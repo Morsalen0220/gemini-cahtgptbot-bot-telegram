@@ -1,0 +1,15 @@
+{
+  "name": "telegram-product-bot-node24",
+  "version": "2.0.0",
+  "main": "src/bot.js",
+  "scripts": {
+    "start": "node src/bot.js",
+    "dev": "node --watch src/bot.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^5.2.1",
+    "qrcode": "^1.5.4",
+    "telegraf": "^4.16.3"
+  }
+}

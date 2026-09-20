@@ -726,19 +726,22 @@ bot.action(/^deposit:start(?::([\d.]+))?$/, async (ctx) => {
 ━━━━━━━━━━━━━━━━━━━
 Please choose your preferred deposit gateway:
 • <b>Binance Pay:</b> Instant C2C (Min: <b>$0.60 USDT</b>)
-• <b>Crypto USDT:</b> BEP20 & Polygon (Min: <b>$1.00 USDT</b>)`;
+• <b>USDT (BEP20):</b> BNB Smart Chain (Min: <b>$1.00 USDT</b>)
+• <b>USDT (Polygon):</b> Polygon / POL (Min: <b>$1.00 USDT</b>)`;
 
   const buttons = Markup.inlineKeyboard([
-    [Markup.button.callback("🟡 Binance Pay (Min $0.60)", `deposit:binance:${suggestedAmount}`)],
-    [Markup.button.callback("🌐 USDT BEP20 / Polygon (Min $1.00)", `deposit:crypto:${suggestedAmount}`)],
+    [Markup.button.callback("🟡 USDT (BEP20 / BSC)", `deposit:bep20:${suggestedAmount}`)],
+    [Markup.button.callback("🟣 USDT (Polygon / POL)", `deposit:polygon:${suggestedAmount}`)],
+    [Markup.button.callback("⚡ Binance Pay (Min $0.60)", `deposit:binance:${suggestedAmount}`)],
     [Markup.button.callback("🔙 Back to Wallet", "menu:wallet")]
   ]);
 
-  try {
-    await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
-  } catch (e) {
-    await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
+    } catch (e) {}
   }
+  await ctx.reply(text, { parse_mode: "HTML", ...buttons });
 });
 
 // Binance Pay prompt
@@ -823,17 +826,77 @@ async function showBinancePayInstructions(ctx, amount) {
   await ctx.reply(text, { parse_mode: "HTML", ...buttons });
 }
 
-// USDT BEP20 / Polygon deposit
+// USDT BEP20 deposit
+bot.action(/^deposit:bep20(?::([\d.]+))?$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const amount = ctx.match[1] ? Number(ctx.match[1]) : 1.0;
+  await showBep20DepositInstructions(ctx, amount);
+});
+
+// USDT Polygon deposit
+bot.action(/^deposit:polygon(?::([\d.]+))?$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const amount = ctx.match[1] ? Number(ctx.match[1]) : 1.0;
+  await showPolygonDepositInstructions(ctx, amount);
+});
+
+// Backwards compatibility alias
 bot.action(/^deposit:crypto(?::([\d.]+))?$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const amount = ctx.match[1] ? Number(ctx.match[1]) : 1.0;
-  await showCryptoDepositInstructions(ctx, amount);
+  await showBep20DepositInstructions(ctx, amount);
 });
 
-async function showCryptoDepositInstructions(ctx, amount) {
+async function showBep20DepositInstructions(ctx, amount) {
   const settings = getAllSettings();
   const user = getOrCreateUser(ctx.from);
   const bep20Address = settings.bep20_usdt_address || "0xC3fC8C91A5B26C71DcD0aC1F34944FB298bCeBbF";
+  const finalAmount = Math.max(1.0, Number(amount) || 1.0);
+
+  const deposit = createDeposit({
+    user_id: user.id,
+    user_name: user.username ? `@${user.username}` : user.first_name,
+    amount: finalAmount,
+    method: "USDT_BEP20",
+    address: bep20Address
+  });
+
+  ctx.session.activeDepositId = deposit.id;
+
+  const text = `🟡 <b>USDT DEPOSIT (BEP20 / BSC)</b>
+━━━━━━━━━━━━━━━━━━━
+💰 <b>Network:</b> <b>BNB Smart Chain (BEP20)</b>
+💵 <b>Minimum Deposit:</b> <b>1.00 USDT</b>
+<i>(Wallet is credited automatically upon on-chain arrival)</i>
+
+━━━━━━━━━━━━━━━━━━━
+🟡 <b>BEP20 USDT Address:</b>
+<code>${bep20Address}</code>
+<i>👆 (Tap address above to copy automatically)</i>
+━━━━━━━━━━━━━━━━━━━
+
+⚠️ <b>Guidelines:</b>
+• Send only <b>USDT (BEP20)</b> to the address above.
+• Tap on the address to auto-copy to your clipboard.
+• After sending, tap <b>"✅ I've Paid"</b> below to submit proof!`;
+
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("✅ I've Paid", `deposit_paid:${deposit.id}`)],
+    [Markup.button.callback("🟣 Switch to Polygon", `deposit:polygon:${finalAmount}`)],
+    [Markup.button.callback("🔙 Choose Method", "deposit:start"), Markup.button.callback("❌ Cancel", "menu:wallet")]
+  ]);
+
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
+    } catch (e) {}
+  }
+  await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+}
+
+async function showPolygonDepositInstructions(ctx, amount) {
+  const settings = getAllSettings();
+  const user = getOrCreateUser(ctx.from);
   const polygonAddress = settings.polygon_usdt_address || "0x58F0C60b37E5c84C4C7fE4a553F1fCe6405F412b";
   const finalAmount = Math.max(1.0, Number(amount) || 1.0);
 
@@ -841,51 +904,41 @@ async function showCryptoDepositInstructions(ctx, amount) {
     user_id: user.id,
     user_name: user.username ? `@${user.username}` : user.first_name,
     amount: finalAmount,
-    method: "USDT_BEP20_POLYGON",
-    address: bep20Address
+    method: "USDT_POLYGON",
+    address: polygonAddress
   });
 
   ctx.session.activeDepositId = deposit.id;
 
-  const text = `🌐 <b>USDT DEPOSIT (BEP20 & POLYGON)</b>
+  const text = `🟣 <b>USDT DEPOSIT (POLYGON / MATIC)</b>
 ━━━━━━━━━━━━━━━━━━━
-💰 <b>Amount to send:</b> <b>${Number(deposit.amount).toFixed(2)} USDT</b>
-<i>(Minimum: 1.00 USDT — wallet is credited with exact on-chain arrival)</i>
+💰 <b>Network:</b> <b>Polygon (POL / MATIC)</b>
+💵 <b>Minimum Deposit:</b> <b>1.00 USDT</b>
+<i>(Wallet is credited automatically upon on-chain arrival)</i>
 
 ━━━━━━━━━━━━━━━━━━━
-🟡 <b>BEP20 (BNB Smart Chain) USDT Address:</b>
-<code>${bep20Address}</code>
-<i>👆 (Tap address above to copy automatically)</i>
-
-🟣 <b>Polygon (MATIC/POL) USDT Address:</b>
+🟣 <b>Polygon USDT Address:</b>
 <code>${polygonAddress}</code>
 <i>👆 (Tap address above to copy automatically)</i>
 ━━━━━━━━━━━━━━━━━━━
 
-⚠️ <b>Important Guidelines:</b>
-• Only send USDT on <b>BEP20 (BSC)</b> or <b>Polygon</b> network.
-• Minimum deposit: <b>1.00 USDT</b>.
-• Tap on either address above to auto-copy instantly without manual selection.
-• After transferring, tap <b>"✅ I've Paid"</b> below to submit proof and get credited!`;
+⚠️ <b>Guidelines:</b>
+• Send only <b>USDT (Polygon)</b> to the address above.
+• Tap on the address to auto-copy to your clipboard.
+• After sending, tap <b>"✅ I've Paid"</b> below to submit proof!`;
 
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback("✅ I've Paid", `deposit_paid:${deposit.id}`)],
-    [Markup.button.callback("❌ Cancel", "menu:wallet")]
+    [Markup.button.callback("🟡 Switch to BEP20", `deposit:bep20:${finalAmount}`)],
+    [Markup.button.callback("🔙 Choose Method", "deposit:start"), Markup.button.callback("❌ Cancel", "menu:wallet")]
   ]);
 
-  try {
-    const qrBuffer = await QRCode.toBuffer(bep20Address, { width: 300, margin: 1 });
-    await ctx.replyWithPhoto(
-      { source: qrBuffer },
-      {
-        caption: text,
-        parse_mode: "HTML",
-        ...buttons
-      }
-    );
-  } catch (err) {
-    await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
+    } catch (e) {}
   }
+  await ctx.reply(text, { parse_mode: "HTML", ...buttons });
 }
 
 // User taps "I've Paid"
@@ -1843,6 +1896,10 @@ bot.action("adm:settings", async (ctx) => {
       Markup.button.callback(s.fake_sales_broadcast_enabled !== false ? "🔴 Sales Off" : "🟢 Sales On", "adm_toggle_fake_sales"),
       Markup.button.callback(s.fake_deposits_broadcast_enabled !== false ? "🔴 Deposits Off" : "🟢 Deposits On", "adm_toggle_fake_deps")
     ],
+    [
+      Markup.button.callback("🚀 Test Deposit Broadcast", "adm_test_dep_broadcast"),
+      Markup.button.callback("🚀 Test Sale Broadcast", "adm_test_sale_broadcast")
+    ],
     [Markup.button.callback("✏️ Edit Channel", "adm_set_chan"), Markup.button.callback("✏️ Edit Group", "adm_set_grp")],
     [Markup.button.callback("✏️ Edit BEP20 USDT", "adm_set_bep20"), Markup.button.callback("✏️ Edit Polygon USDT", "adm_set_polygon")],
     [Markup.button.callback("✏️ Edit Binance Pay ID", "adm_set_binpay")],
@@ -1850,6 +1907,32 @@ bot.action("adm:settings", async (ctx) => {
   ]);
 
   await ctx.reply(text, buttons);
+});
+
+bot.action("adm_test_dep_broadcast", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  await ctx.reply("⏳ Sending test deposit notice to group...");
+  const res = await sendGroupDepositNotice();
+  if (res && res.success) {
+    await ctx.reply(`✅ Test deposit notice sent to group! Message ID: ${res.messageId}`);
+  } else {
+    await ctx.reply(`❌ Failed to send deposit notice: ${res?.error || "Check group ID or bot admin status"}`);
+  }
+});
+
+bot.action("adm_test_sale_broadcast", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  await ctx.reply("⏳ Sending test purchase notice to group...");
+  const prod = pickBroadcastProduct();
+  const qty = pickBroadcastQuantity();
+  const res = await sendGroupPurchaseNotice(prod, qty);
+  if (res && res.success) {
+    await ctx.reply(`✅ Test purchase notice sent to group! Message ID: ${res.messageId}`);
+  } else {
+    await ctx.reply(`❌ Failed to send purchase notice: ${res?.error || "Check group ID or bot admin status"}`);
+  }
 });
 
 bot.action("adm_toggle_fake_sales", async (ctx) => {
@@ -2261,8 +2344,8 @@ function pickBroadcastQuantity() {
 
 async function sendGroupPurchaseNotice(productOrName, quantity, maskedId = null) {
   const settings = getAllSettings();
-  const groupId = settings.group_id;
-  if (!groupId) return;
+  const groupId = settings.group_id || process.env.FORCE_GROUP_ID || "-1004432303031";
+  if (!groupId) return { success: false, error: "No group_id" };
 
   const prods = getProducts();
   let product = null;
@@ -2303,32 +2386,35 @@ async function sendGroupPurchaseNotice(productOrName, quantity, maskedId = null)
   try {
     const botInfo = await bot.telegram.getMe().catch(() => null);
     const botUsername = botInfo?.username || "aibuyshop_bot";
-    await bot.telegram.sendMessage(groupId, msg, {
+    const result = await bot.telegram.sendMessage(groupId, msg, {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard([
         [Markup.button.url("🛒 Buy Now via Bot", `https://t.me/${botUsername}?start=buy`)]
       ])
     });
+    console.log(`[Group Broadcast] Purchase notice published to ${groupId}: ${productName} (x${qty}, msgId: ${result.message_id})`);
+    return { success: true, messageId: result.message_id };
   } catch (err) {
-    // Silent fail if bot is not in group or network temporary issue
+    console.error(`[Group Broadcast Error] Failed to send purchase notice to ${groupId}:`, err.message || err);
+    return { success: false, error: err.message };
   }
 }
 
 let isBroadcasterStarted = false;
-function scheduleNextPurchaseBroadcast() {
-  // Random delay between 1 minute (60 seconds) and 10 minutes (600 seconds)
-  const minMs = 60 * 1000;    // 1 min
-  const maxMs = 600 * 1000;   // 10 mins
+function scheduleNextPurchaseBroadcast(isFirstRun = false) {
+  // Random delay: first run in 30-45s, subsequently between 1 and 8 minutes
+  const minMs = isFirstRun ? 30 * 1000 : 60 * 1000;
+  const maxMs = isFirstRun ? 45 * 1000 : 480 * 1000;
   const delayMs = Math.floor(minMs + Math.random() * (maxMs - minMs));
 
   setTimeout(async () => {
     const settings = getAllSettings();
-    if (settings.fake_sales_broadcast_enabled !== false && settings.group_id) {
+    if (settings.fake_sales_broadcast_enabled !== false) {
       const prod = pickBroadcastProduct();
       const qty = pickBroadcastQuantity();
       await sendGroupPurchaseNotice(prod, qty);
     }
-    scheduleNextPurchaseBroadcast();
+    scheduleNextPurchaseBroadcast(false);
   }, delayMs);
 }
 
@@ -2379,8 +2465,11 @@ function generateCryptoTransactionProof() {
 
 async function sendGroupDepositNotice() {
   const settings = getAllSettings();
-  const groupId = settings.group_id;
-  if (!groupId) return;
+  const groupId = settings.group_id || process.env.FORCE_GROUP_ID || "-1004432303031";
+  if (!groupId) {
+    console.warn("[Group Broadcast] No group_id configured.");
+    return { success: false, error: "No group_id configured" };
+  }
 
   const customerName = getRandomCustomerName();
   const depositAmount = pickBroadcastDepositAmount();
@@ -2398,37 +2487,42 @@ async function sendGroupDepositNotice() {
   try {
     const botInfo = await bot.telegram.getMe().catch(() => null);
     const botUsername = botInfo?.username || "aibuyshop_bot";
-    await bot.telegram.sendMessage(groupId, msg, {
+    const result = await bot.telegram.sendMessage(groupId, msg, {
       parse_mode: "HTML",
       disable_web_page_preview: true,
       ...Markup.inlineKeyboard([
         [Markup.button.url("🛒 Buy Now via Bot", `https://t.me/${botUsername}?start=buy`)]
       ])
     });
-    console.log(`[Group Broadcast] Deposit notice published: ${customerName} (+${depositAmount} USDT)`);
+    console.log(`[Group Broadcast] Deposit notice published to ${groupId}: ${customerName} (+${depositAmount} USDT, msgId: ${result.message_id})`);
+    return { success: true, messageId: result.message_id };
   } catch (err) {
-    // Silent fail if bot is not in group or network temporary issue
+    console.error(`[Group Broadcast Error] Failed to send deposit notice to ${groupId}:`, err.message || err);
+    return { success: false, error: err.message };
   }
 }
 
 let isDepositBroadcasterStarted = false;
-function scheduleNextDepositBroadcast() {
-  // Most of the time (~75%): delay is random between 1 and 15 minutes
-  // Sometimes (~25%): quick burst (45s - 150s) so within 1-15 min period 2 or 3 posts appear
-  const isBurst = Math.random() < 0.25;
+function scheduleNextDepositBroadcast(isFirstRun = false) {
   let delayMs;
-  if (isBurst) {
-    delayMs = Math.floor(45 * 1000 + Math.random() * (105 * 1000));
+  if (isFirstRun) {
+    delayMs = 15 * 1000; // First deposit post fires in 15 seconds after startup!
   } else {
-    delayMs = Math.floor(60 * 1000 + Math.random() * (14 * 60 * 1000));
+    // 30% chance quick burst (30s - 90s), 70% chance 1 min to 10 mins
+    const isBurst = Math.random() < 0.30;
+    if (isBurst) {
+      delayMs = Math.floor(30 * 1000 + Math.random() * (60 * 1000));
+    } else {
+      delayMs = Math.floor(60 * 1000 + Math.random() * (9 * 60 * 1000));
+    }
   }
 
   setTimeout(async () => {
     const settings = getAllSettings();
-    if (settings.fake_deposits_broadcast_enabled !== false && settings.group_id) {
+    if (settings.fake_deposits_broadcast_enabled !== false) {
       await sendGroupDepositNotice();
     }
-    scheduleNextDepositBroadcast();
+    scheduleNextDepositBroadcast(false);
   }, delayMs);
 }
 
@@ -2542,8 +2636,8 @@ async function startApp() {
       console.log(`HTTP server listening on 0.0.0.0:${PORT}`);
       if (!isBroadcasterStarted) {
         isBroadcasterStarted = true;
-        scheduleNextPurchaseBroadcast();
-        scheduleNextDepositBroadcast();
+        scheduleNextPurchaseBroadcast(true);
+        scheduleNextDepositBroadcast(true);
         startChannelDailyPoster();
       }
       try {
@@ -2575,8 +2669,8 @@ async function startApp() {
           console.log("Telegram Gemini AI Shop bot started successfully (polling mode).");
           if (!isBroadcasterStarted) {
             isBroadcasterStarted = true;
-            scheduleNextPurchaseBroadcast();
-            scheduleNextDepositBroadcast();
+            scheduleNextPurchaseBroadcast(true);
+            scheduleNextDepositBroadcast(true);
             startChannelDailyPoster();
           }
         })

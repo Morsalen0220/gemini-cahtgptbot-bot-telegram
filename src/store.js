@@ -48,10 +48,8 @@ const defaultProducts = [
       { min: 1, max: 100, price: 0.55 },
       { min: 101, max: 999999, price: 0.50 }
     ],
-    description: `✅ 18 Months Plan (Official on your Gmail)
-✅ 5TB Cloud Storage + Add 5 Family Members
-✅ 100% Private, Works in any country
-⚡️ Activate via redeem link within 24 hours`,
+    description: `✅ Official 18-Month Plan on your Gmail (2TB Cloud Storage)
+⚡️ Instant automated redeem link delivery • 100% Guaranteed`,
     terms: `• Fresh & valid redeem link delivered instantly
 • Must redeem within 24 hours of delivery
 • Non-refundable after delivery`,
@@ -66,7 +64,7 @@ const defaultProducts = [
     outOfStock: true,
     bulk_tiers: [],
     description: `✅ 1 Month 4K UHD Profile (Private PIN)
-✅ Works on phone, tablet, TV & PC`,
+⚡️ Instant automated delivery • Works on TV, PC & Mobile`,
     terms: `• No refunds after credentials are sent
 • Do not change account email or master password`,
     codes: []
@@ -82,8 +80,8 @@ const defaultProducts = [
       { min: 1, max: 50, price: 0.40 },
       { min: 51, max: 999999, price: 0.35 }
     ],
-    description: `✅ Duolingo Super 12 Months
-✅ Unlimited hearts, no ads & offline lessons`,
+    description: `✅ Duolingo Super 12 Months (Unlimited hearts & no ads)
+⚡️ Instant activation • 100% Full period guarantee`,
     terms: `• Non-refundable once activated
 • Guaranteed valid for 12 months`,
     codes: []
@@ -99,8 +97,8 @@ const defaultProducts = [
       { min: 1, max: 50, price: 1.00 },
       { min: 51, max: 999999, price: 0.90 }
     ],
-    description: `✅ Adobe Express Premium 12 Months
-✅ 100GB Cloud & Generative AI credits`,
+    description: `✅ Adobe Express Premium 12 Months + 100GB Cloud
+⚡️ Generative AI credits included • Instant delivery`,
     terms: `• Full period replacement guarantee
 • Activated directly on Adobe ID`,
     codes: []
@@ -116,8 +114,8 @@ const defaultProducts = [
       { min: 1, max: 50, price: 0.85 },
       { min: 51, max: 999999, price: 0.75 }
     ],
-    description: `✅ Apple Music 5 Months Individual
-✅ Lossless & Spatial Audio with Dolby Atmos`,
+    description: `✅ Apple Music 5 Months Individual (Lossless & Spatial Audio)
+⚡️ Instant official promo code delivery • 100% Active`,
     terms: `• Single use promo code
 • Applicable for new and eligible returning accounts`,
     codes: []
@@ -136,8 +134,8 @@ const defaultProducts = [
       { min: 1, max: 10, price: 3.50 },
       { min: 11, max: 999999, price: 3.00 }
     ],
-    description: `✅ Official Google Gemini 1.5 Pro/Flash API Key
-✅ High TPM/RPM for Cursor, LangChain & Python`,
+    description: `✅ Official Google Gemini 1.5 Pro API Key for Cursor & Python
+⚡️ High RPM/TPM limits • Instant automated token delivery`,
     terms: `• Key delivered instantly to your chat
 • Guaranteed active & fresh on arrival`,
     codes: []
@@ -153,8 +151,8 @@ const defaultProducts = [
       { min: 1, max: 10, price: 4.50 },
       { min: 11, max: 999999, price: 4.00 }
     ],
-    description: `✅ Official OpenAI API Key (Pre-funded Tier 1)
-✅ Full access to GPT-4o, GPT-4 Turbo & DALL-E 3`,
+    description: `✅ Official OpenAI API Key (GPT-4o & DALL-E 3 supported)
+⚡️ Pre-funded Tier 1 credits • Instant automated delivery`,
     terms: `• Instant automated key delivery
 • Replacement guarantee if invalid on arrival`,
     codes: []
@@ -170,8 +168,8 @@ const defaultProducts = [
       { min: 1, max: 10, price: 6.50 },
       { min: 11, max: 999999, price: 5.80 }
     ],
-    description: `✅ Anthropic Claude 3.5 Sonnet API Access
-✅ 200,000 Tokens for Cursor, Cline & Claude Dev`,
+    description: `✅ Anthropic Claude 3.5 Sonnet API Key (200k Context)
+⚡️ Ideal for Cursor, Cline & Claude Dev • Instant delivery`,
     terms: `• Instant automated key delivery
 • Fresh token with verified quota`,
     codes: []
@@ -187,8 +185,8 @@ const defaultProducts = [
       { min: 1, max: 5, price: 9.50 },
       { min: 6, max: 999999, price: 8.50 }
     ],
-    description: `✅ Google Cloud Console $300 Free Trial Credit
-✅ Deploy Vertex AI, Compute VMs & VPS`,
+    description: `✅ Google Cloud Console $300 Free Trial Credit Account
+⚡️ Deploy Vertex AI & Compute VMs • Instant account delivery`,
     terms: `• Digital account credentials delivered instantly
 • Valid balance guaranteed on initial login`,
     codes: []
@@ -205,7 +203,7 @@ const defaultProducts = [
       { min: 11, max: 999999, price: 2.00 }
     ],
     description: `✅ Official DeepSeek V3 & R1 Reasoning API Key
-✅ OpenAI compatible API with ultra-low latency`,
+⚡️ Ultra-low latency, OpenAI compatible • Instant delivery`,
     terms: `• Instant automated token delivery
 • Guaranteed 100% active`,
     codes: []
@@ -250,7 +248,9 @@ function normalizeDb(raw) {
       raw.products.push(defP);
     } else {
       if (!existing.category) existing.category = defP.category || "standard";
-      if (existing.description === undefined) existing.description = defP.description;
+      if (existing.description === undefined || existing.description.length > 150) {
+        existing.description = defP.description;
+      }
       if (existing.terms === undefined) existing.terms = defP.terms;
       if (existing.price === undefined) existing.price = defP.price;
       if (existing.bulk_tiers === undefined) existing.bulk_tiers = defP.bulk_tiers;

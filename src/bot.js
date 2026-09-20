@@ -5,10 +5,13 @@ const QRCode = require("qrcode");
 const express = require("express");
 
 const {
+  initStore,
   getSetting,
   getAllSettings,
   setSetting,
   getProducts,
+  getStandardProducts,
+  getApiKeyProducts,
   getProduct,
   updateProduct,
   addProduct,
@@ -93,47 +96,80 @@ function adminOnly(ctx) {
   return true;
 }
 
-// Check if user has joined required channel/group
-async function checkMembership(ctx) {
+const userLastVerifiedAt = new Map();
+
+// Check if user has joined required channel/group via live Telegram API
+async function verifyLiveMembership(ctx, userId) {
+  const settings = getAllSettings();
+  if (!settings.force_join_enabled) {
+    return { ok: true, channelOk: true, groupOk: true };
+  }
+
+  // Bot admin is always allowed
+  if (String(userId) === ADMIN_ID) {
+    return { ok: true, channelOk: true, groupOk: true };
+  }
+
+  const validStatuses = ["creator", "administrator", "member", "restricted"];
+  let channelOk = false;
+  let groupOk = false;
+
+  // 1. Check Channel Membership
+  if (settings.channel_id) {
+    try {
+      const member = await bot.telegram.getChatMember(settings.channel_id, userId);
+      channelOk = validStatuses.includes(member?.status);
+    } catch (e) {
+      console.warn(`[ForceJoin] Channel check failed for user ${userId}:`, e.message);
+      channelOk = false;
+    }
+  } else {
+    channelOk = true;
+  }
+
+  // 2. Check Group Membership
+  if (settings.group_id) {
+    try {
+      const member = await bot.telegram.getChatMember(settings.group_id, userId);
+      groupOk = validStatuses.includes(member?.status);
+    } catch (e) {
+      console.warn(`[ForceJoin] Group check failed for user ${userId}:`, e.message);
+      groupOk = false;
+    }
+  } else {
+    groupOk = true;
+  }
+
+  const ok = Boolean(channelOk && groupOk);
+  setUserVerified(userId, ok);
+
+  if (ok) {
+    userLastVerifiedAt.set(String(userId), Date.now());
+  } else {
+    userLastVerifiedAt.delete(String(userId));
+  }
+
+  return { ok, channelOk, groupOk };
+}
+
+async function checkMembership(ctx, forceLive = false) {
   const settings = getAllSettings();
   if (!settings.force_join_enabled) return true;
 
   const userId = ctx.from?.id;
-  if (!userId) return true;
+  if (!userId) return false;
+  if (String(userId) === ADMIN_ID) return true;
 
-  // If already verified in database, allow through
-  if (isUserVerified(userId)) return true;
-
-  let channelOk = true;
-  let groupOk = true;
-
-  if (settings.channel_id) {
-    try {
-      const member = await ctx.telegram.getChatMember(settings.channel_id, userId);
-      channelOk = ["creator", "administrator", "member", "restricted"].includes(member.status);
-    } catch (e) {
-      console.warn("Could not verify channel membership:", e.message);
-      channelOk = false;
-    }
-  }
-
-  if (settings.group_id) {
-    try {
-      const member = await ctx.telegram.getChatMember(settings.group_id, userId);
-      groupOk = ["creator", "administrator", "member", "restricted"].includes(member.status);
-    } catch (e) {
-      console.warn("Could not verify group membership:", e.message);
-      groupOk = false;
-    }
-  }
-
-  // If both channel and group pass, mark user verified
-  if (channelOk && groupOk) {
-    setUserVerified(userId, true);
+  // If forceLive is false and verified recently (within 45 seconds), allow through
+  const lastCheck = userLastVerifiedAt.get(String(userId)) || 0;
+  const isRecentlyChecked = (Date.now() - lastCheck) < 45 * 1000;
+  if (!forceLive && isUserVerified(userId) && isRecentlyChecked) {
     return true;
   }
 
-  return false;
+  // Otherwise perform live verification
+  const { ok } = await verifyLiveMembership(ctx, userId);
+  return ok;
 }
 
 function forceJoinKeyboard() {
@@ -207,7 +243,7 @@ bot.start(async (ctx) => {
     }
   }
 
-  const joined = await checkMembership(ctx);
+  const joined = await checkMembership(ctx, true);
   if (!joined) {
     const settings = getAllSettings();
     return ctx.reply(
@@ -222,15 +258,35 @@ bot.start(async (ctx) => {
 // Membership verification callback
 bot.action("check_membership", async (ctx) => {
   const userId = ctx.from?.id;
-  const joined = await checkMembership(ctx);
-  if (!joined) {
-    return ctx.answerCbQuery("❌ You haven't joined both our Channel and Group yet. Please join and try again.", {
-      show_alert: true
-    });
+  if (!userId) return;
+
+  const { ok, channelOk, groupOk } = await verifyLiveMembership(ctx, userId);
+  if (!ok) {
+    if (!channelOk && !groupOk) {
+      return ctx.answerCbQuery("❌ You haven't joined both our Channel & Group yet! Please join both first.", {
+        show_alert: true
+      });
+    }
+    if (!channelOk) {
+      return ctx.answerCbQuery("❌ You haven't joined our Channel yet! Please join the channel first.", {
+        show_alert: true
+      });
+    }
+    if (!groupOk) {
+      return ctx.answerCbQuery("❌ You haven't joined our Group yet! Please join the group first.", {
+        show_alert: true
+      });
+    }
+    return ctx.answerCbQuery("❌ Membership not found. Please join and try again.", { show_alert: true });
   }
 
-  setUserVerified(userId, true);
   await ctx.answerCbQuery("🎉 Verified successfully!");
+
+  // Delete the Access Denied / Force Join prompt message so it vanishes cleanly
+  try {
+    await ctx.deleteMessage();
+  } catch (err) {}
+
   const user = getOrCreateUser(ctx.from);
   await ctx.reply(
     `🎉 Congratulations! You have successfully joined.\nWelcome to Gemini AI Shop!\n\n` + welcomeText(user),
@@ -258,14 +314,17 @@ bot.use(async (ctx, next) => {
   const settings = getAllSettings();
   if (settings.force_join_enabled) {
     const userId = ctx.from?.id;
-    if (userId && !isUserVerified(userId)) {
-      if (ctx.callbackQuery) {
-        await ctx.answerCbQuery("⚠️ Please join our Channel and Group first!", { show_alert: true });
+    if (userId) {
+      const isJoined = await checkMembership(ctx, false);
+      if (!isJoined) {
+        if (ctx.callbackQuery) {
+          await ctx.answerCbQuery("⚠️ Access Denied! Please join our Channel and Group first!", { show_alert: true });
+        }
+        return ctx.reply(
+          `⚠️ Access Denied!\nYou must join our Channel and Group before using any bot features.\n\n📢 Channel: ${settings.channel_link}\n👥 Group: ${settings.group_link}\n\n👇 After joining, tap "Check / I Have Joined" below:`,
+          forceJoinKeyboard()
+        );
       }
-      return ctx.reply(
-        `⚠️ Access Denied!\nYou must join our Channel and Group before using any bot features.\n\n📢 Channel: ${settings.channel_link}\n👥 Group: ${settings.group_link}\n\n👇 After joining, tap "Check / I Have Joined" below:`,
-        forceJoinKeyboard()
-      );
     }
   }
 
@@ -311,7 +370,7 @@ bot.action("menu:main", async (ctx) => {
 async function showCatalog(ctx) {
   if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
-  const products = getProducts();
+  const products = getStandardProducts();
   const text = `Pick a product below — price and live stock are shown on each button.
 ⚡️ Delivery is instant once payment clears.`;
 
@@ -341,15 +400,16 @@ bot.action(/^prod:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const productId = ctx.match[1];
   const p = getProduct(productId);
+  const backMenu = p && p.category === "api_key" ? "menu:apikey" : "menu:buy";
 
   if (!p) {
-    return ctx.reply("❌ Product not found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Catalog", "menu:buy")]]));
+    return ctx.reply("❌ Product not found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Catalog", backMenu)]]));
   }
 
   if (p.outOfStock || p.stock <= 0) {
     return ctx.reply(
       `⚠️ ${p.name} is currently out of stock.\nPlease check back later or choose another item.`,
-      Markup.inlineKeyboard([[Markup.button.callback("🔙 Back to Products", "menu:buy")]])
+      Markup.inlineKeyboard([[Markup.button.callback("🔙 Back", backMenu)]])
     );
   }
 
@@ -377,7 +437,7 @@ bot.action(/^prod:(.+)$/, async (ctx) => {
       Markup.button.callback("100", `qty:${p.id}:100`),
       Markup.button.callback("✏️ Custom Qty", `qty_custom:${p.id}`)
     ],
-    [Markup.button.callback("🔙 Back to Products", "menu:buy")]
+    [Markup.button.callback("🔙 Back to Catalog", backMenu)]
   ];
 
   try {
@@ -441,9 +501,10 @@ ${p.terms}
 • Unit Price: ${money(unitPrice)}
 • Total Due: ${money(totalPrice)}`;
 
+  const backMenu = p.category === "api_key" ? "menu:apikey" : "menu:buy";
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback("✅ I have read — Continue to Payment", "order:pay_check")],
-    [Markup.button.callback("❌ Cancel Order", "menu:buy")]
+    [Markup.button.callback("❌ Cancel Order", backMenu)]
   ]);
 
   if (ctx.callbackQuery) {
@@ -495,6 +556,7 @@ Add funds below, then come back and pay from your wallet.`;
 
   // Sufficient balance: confirm payment
   const p = getProduct(pending.productId);
+  const backMenu = p && p.category === "api_key" ? "menu:apikey" : "menu:buy";
   const text = `👛 Confirm Payment
 
 Product: ${p.name}
@@ -505,7 +567,7 @@ Balance After: ${money(currentBal - needed)}`;
 
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback(`⚡ Pay ${money(needed)} from Wallet`, "order:execute_pay")],
-    [Markup.button.callback("❌ Cancel", "menu:buy")]
+    [Markup.button.callback("❌ Cancel", backMenu)]
   ]);
 
   try {
@@ -576,8 +638,10 @@ bot.action("order:execute_pay", async (ctx) => {
 
   deliveryText += `\n\n🛡️ Remember to redeem your links/codes within 24 hours.\nThank you for choosing Gemini Shop!`;
 
+  const backMenu = p && p.category === "api_key" ? "menu:apikey" : "menu:buy";
   await ctx.reply(deliveryText, Markup.inlineKeyboard([
     [Markup.button.callback("💰 My Orders", "menu:orders")],
+    [Markup.button.callback(p && p.category === "api_key" ? "🔑 API Keys Store" : "🛍️ Buy More", backMenu)],
     [Markup.button.callback("🏠 Main Menu", "menu:main")]
   ]));
 
@@ -1226,46 +1290,38 @@ Please include your Order Code or Deposit ID when contacting support for fastest
   await ctx.reply(text, buttons);
 }
 
-// API KEY
+// =====================================================
+// AI API KEYS & CLOUD TOKENS (Dedicated Store Section)
+// =====================================================
 async function showApiKey(ctx) {
   if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
-  const user = getOrCreateUser(ctx.from);
+  const products = getApiKeyProducts();
 
-  const text = `🆙 DEVELOPER API
+  const text = `🆙 AI API KEYS & CLOUD TOKENS
 
-Integrate our instant digital product dispensary into your own bot or website!
+Select an API Key or Cloud Token package below to view details, bulk discounts, and buy instantly:
+⚡️ Instant automated delivery directly to your chat once payment clears.`;
 
-🔑 Your API Key:
-${user.api_key}
+  const buttons = products.map((p) => {
+    let label;
+    if (p.outOfStock || p.stock <= 0) {
+      label = `${p.name} • Out of stock`;
+    } else {
+      label = `${p.name} • ${money(p.price)} | Stock: ${p.stock}`;
+    }
+    return [Markup.button.callback(label, `prod:${p.id}`)];
+  });
 
-Endpoints:
-• GET /api/products — View products & live stock
-• POST /api/order — Create automated order
-
-Keep your API key confidential!`;
-
-  const buttons = Markup.inlineKeyboard([
-    [Markup.button.callback("🔄 Regenerate Key", "api:regenerate")],
-    [Markup.button.callback("🔙 Main Menu", "menu:main")]
-  ]);
+  buttons.push([Markup.button.callback("🔙 Main Menu", "menu:main")]);
 
   if (ctx.callbackQuery) {
     try {
-      await ctx.editMessageText(text, buttons);
+      await ctx.editMessageText(text, Markup.inlineKeyboard(buttons));
       return;
     } catch (e) {}
   }
-  await ctx.reply(text, buttons);
+  await ctx.reply(text, Markup.inlineKeyboard(buttons));
 }
-
-bot.action("api:regenerate", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  const newKey = regenerateApiKey(ctx.from.id);
-  await ctx.reply(
-    `✅ New API Key generated:\n${newKey}`,
-    Markup.inlineKeyboard([[Markup.button.callback("🔙 API Menu", "menu:apikey")]])
-  );
-});
 
 // =====================================================
 // ADMIN PANEL (/admin)
@@ -1840,60 +1896,69 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.RENDER_EXTERNAL_URL;
 let server;
 let isShuttingDown = false;
 
-if (WEBHOOK_URL) {
-  const cleanUrl = WEBHOOK_URL.replace(/\/+$/, "");
-  const secretPath = `/webhook/${bot.secretPathComponent ? bot.secretPathComponent() : "telegraf"}`;
-  app.use(bot.webhookCallback(secretPath));
+async function startApp() {
+  // Initialize persistent database (Google Firebase or local file fallback)
+  await initStore();
 
-  server = app.listen(PORT, "0.0.0.0", async () => {
-    console.log(`HTTP server listening on 0.0.0.0:${PORT}`);
-    if (!isBroadcasterStarted) {
-      isBroadcasterStarted = true;
-      scheduleNextPurchaseBroadcast();
-    }
-    try {
-      await bot.telegram.setWebhook(`${cleanUrl}${secretPath}`);
-      console.log(`Telegram webhook registered at: ${cleanUrl}${secretPath}`);
-    } catch (err) {
-      console.error("Failed to register Telegram webhook:", err.message);
-    }
-  });
-} else {
-  server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`HTTP server listening on 0.0.0.0:${PORT}`);
-  });
+  if (WEBHOOK_URL) {
+    const cleanUrl = WEBHOOK_URL.replace(/\/+$/, "");
+    const secretPath = `/webhook/${bot.secretPathComponent ? bot.secretPathComponent() : "telegraf"}`;
+    app.use(bot.webhookCallback(secretPath));
 
-  server.on("error", (err) => {
-    if (err.code === "EADDRINUSE") {
-      console.log(`Port ${PORT} in use; skipping extra HTTP listener.`);
-    } else {
-      console.error("HTTP server error:", err);
-    }
-  });
+    server = app.listen(PORT, "0.0.0.0", async () => {
+      console.log(`HTTP server listening on 0.0.0.0:${PORT}`);
+      if (!isBroadcasterStarted) {
+        isBroadcasterStarted = true;
+        scheduleNextPurchaseBroadcast();
+      }
+      try {
+        await bot.telegram.setWebhook(`${cleanUrl}${secretPath}`);
+        console.log(`Telegram webhook registered at: ${cleanUrl}${secretPath}`);
+      } catch (err) {
+        console.error("Failed to register Telegram webhook:", err.message);
+      }
+    });
+  } else {
+    server = app.listen(PORT, "0.0.0.0", () => {
+      console.log(`HTTP server listening on 0.0.0.0:${PORT}`);
+    });
 
-  const launchBot = () => {
-    if (isShuttingDown) return;
-    bot.launch({
-      dropPendingUpdates: false
-    })
-      .then(() => {
-        console.log("Telegram Gemini AI Shop bot started successfully (polling mode).");
-        if (!isBroadcasterStarted) {
-          isBroadcasterStarted = true;
-          scheduleNextPurchaseBroadcast();
-        }
+    server.on("error", (err) => {
+      if (err.code === "EADDRINUSE") {
+        console.log(`Port ${PORT} in use; skipping extra HTTP listener.`);
+      } else {
+        console.error("HTTP server error:", err);
+      }
+    });
+
+    const launchBot = () => {
+      if (isShuttingDown) return;
+      bot.launch({
+        dropPendingUpdates: false
       })
-      .catch((error) => {
-        console.error("Bot launch network glitch:", error.message || error);
-        if (!isShuttingDown) {
-          console.log("Reconnecting in 4 seconds...");
-          setTimeout(launchBot, 4000);
-        }
-      });
-  };
+        .then(() => {
+          console.log("Telegram Gemini AI Shop bot started successfully (polling mode).");
+          if (!isBroadcasterStarted) {
+            isBroadcasterStarted = true;
+            scheduleNextPurchaseBroadcast();
+          }
+        })
+        .catch((error) => {
+          console.error("Bot launch network glitch:", error.message || error);
+          if (!isShuttingDown) {
+            console.log("Reconnecting in 4 seconds...");
+            setTimeout(launchBot, 4000);
+          }
+        });
+    };
 
-  launchBot();
+    launchBot();
+  }
 }
+
+startApp().catch((err) => {
+  console.error("Fatal startup error:", err);
+});
 
 // =====================================================
 // GRACEFUL SHUTDOWN

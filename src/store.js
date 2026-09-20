@@ -1,6 +1,13 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const {
+  isFirebaseConfigured,
+  initFirebase,
+  fetchFirebaseData,
+  saveFirebaseData,
+  listenFirebaseData
+} = require("./firebase");
 
 const file = process.env.DATABASE_FILE || "./data/bot-data.json";
 fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -26,6 +33,7 @@ const defaultProducts = [
   {
     id: "gemini_18m",
     name: "Gemini Links 18M",
+    category: "standard",
     price: 0.55,
     stock: 1048,
     outOfStock: false,
@@ -59,6 +67,7 @@ By continuing you agree to these terms.`,
   {
     id: "netflix_1m",
     name: "Netflix 1M 4K HDR",
+    category: "standard",
     price: 2.50,
     stock: 0,
     outOfStock: true,
@@ -74,6 +83,7 @@ By continuing you agree to these terms.`,
   {
     id: "duolingo_12m",
     name: "Duolingo 12M",
+    category: "standard",
     price: 0.40,
     stock: 294,
     outOfStock: false,
@@ -92,6 +102,7 @@ By continuing you agree to these terms.`,
   {
     id: "adobe_express_12m",
     name: "Adobe Express 12M",
+    category: "standard",
     price: 1.00,
     stock: 204,
     outOfStock: false,
@@ -110,6 +121,7 @@ By continuing you agree to these terms.`,
   {
     id: "apple_music_5m",
     name: "Apple Music 5M",
+    category: "standard",
     price: 0.85,
     stock: 180,
     outOfStock: false,
@@ -124,6 +136,110 @@ By continuing you agree to these terms.`,
     terms: `• Single use promo code
 • Applicable for new and eligible returning accounts`,
     codes: []
+  },
+  // ==========================================
+  // AI API KEYS & CLOUD TOKENS (category: "api_key")
+  // ==========================================
+  {
+    id: "gemini_api_key",
+    name: "Gemini 1.5 Pro API Key",
+    category: "api_key",
+    price: 1.50,
+    stock: 250,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 1.50 },
+      { min: 11, max: 999999, price: 1.20 }
+    ],
+    description: `✅ Official Google Gemini 1.5 Pro / Flash API Key
+✅ High TPM & RPM limits for production & dev
+✅ Full Multimodal support: Text, Vision, Audio & Documents
+✅ Direct integration: Python, Node.js, LangChain, Cursor & LobeChat
+✅ 100% Private & Instant Automated Delivery`,
+    terms: `• Key delivered instantly to your chat upon confirmation
+• Use key responsibly within Google Gemini rate limits
+• Guaranteed active & fresh on arrival`,
+    codes: []
+  },
+  {
+    id: "chatgpt_api_key",
+    name: "ChatGPT OpenAI API Key ($5 / $120 Credit)",
+    category: "api_key",
+    price: 2.00,
+    stock: 180,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 2.00 },
+      { min: 11, max: 999999, price: 1.70 }
+    ],
+    description: `✅ OpenAI Official API Key (Pre-funded Tier 1 / Credits)
+✅ Full access to GPT-4o, GPT-4 Turbo, GPT-3.5 & DALL-E 3
+✅ Works seamlessly with NextChat, LibreChat, TypingMind, VS Code & Cursor
+✅ Guaranteed fresh and working`,
+    terms: `• Instant automated key delivery
+• Valid for all OpenAI standard completions & embeddings
+• Replacement guarantee if invalid on arrival`,
+    codes: []
+  },
+  {
+    id: "claude_api_key",
+    name: "Claude 3.5 Sonnet API Key",
+    category: "api_key",
+    price: 3.00,
+    stock: 120,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 3.00 },
+      { min: 11, max: 999999, price: 2.60 }
+    ],
+    description: `✅ Anthropic Claude 3.5 Sonnet API Access
+✅ 200,000 Tokens Context Window
+✅ Best-in-class coding, reasoning & system prompts
+✅ Ready for Cline, Roo-Code, Cursor & Claude Dev`,
+    terms: `• Instant automated key delivery
+• Fresh token with verified quota
+• Replacement guaranteed within 24 hours`,
+    codes: []
+  },
+  {
+    id: "google_cloud_key",
+    name: "Google Cloud (GCC) $300 Credits Key",
+    category: "api_key",
+    price: 6.00,
+    stock: 75,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 5, price: 6.00 },
+      { min: 6, max: 999999, price: 5.00 }
+    ],
+    description: `✅ Google Cloud Console (GCC) Free Trial Token / Account
+✅ $300 Free Cloud Credits loaded
+✅ Deploy Vertex AI, Compute Engine VMs, VPS & APIs
+✅ Clean billing profile & guaranteed balance`,
+    terms: `• Digital account / credential token delivered instantly
+• Must follow Google Cloud acceptable use policy
+• Valid guarantee upon initial login`,
+    codes: []
+  },
+  {
+    id: "deepseek_api_key",
+    name: "DeepSeek V3 / R1 API Key & Tokens",
+    category: "api_key",
+    price: 1.20,
+    stock: 300,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 1.20 },
+      { min: 11, max: 999999, price: 0.95 }
+    ],
+    description: `✅ DeepSeek Official API Key (DeepSeek-V3 & DeepSeek-R1)
+✅ OpenAI Compatible API endpoint
+✅ Ultra-low latency & deep reasoning capability
+✅ Preloaded tokens ready for immediate deployment`,
+    terms: `• Instant automated token delivery
+• Compatible with any OpenAI client library
+• Guaranteed 100% active`,
+    codes: []
   }
 ];
 
@@ -135,60 +251,120 @@ const defaults = {
   orders: []
 };
 
-function load() {
+let memoryDb = null;
+
+function normalizeDb(raw) {
+  if (!raw || typeof raw !== "object") raw = {};
+  if (!raw.settings || typeof raw.settings !== "object") {
+    raw.settings = { ...defaultSettings };
+  } else {
+    for (const [k, v] of Object.entries(defaultSettings)) {
+      if (raw.settings[k] === undefined) raw.settings[k] = v;
+    }
+  }
+
+  if (!Array.isArray(raw.products)) {
+    if (raw.products && typeof raw.products === "object") {
+      raw.products = Object.values(raw.products);
+    } else {
+      raw.products = [...defaultProducts];
+    }
+  }
+
+  for (const defP of defaultProducts) {
+    const existing = raw.products.find(p => String(p.id) === String(defP.id));
+    if (!existing) {
+      raw.products.push(defP);
+    } else if (!existing.category) {
+      existing.category = defP.category || "standard";
+    }
+  }
+
+  if (!raw.users || typeof raw.users !== "object") raw.users = {};
+  if (!Array.isArray(raw.deposits)) {
+    if (raw.deposits && typeof raw.deposits === "object") raw.deposits = Object.values(raw.deposits);
+    else raw.deposits = [];
+  }
+  if (!Array.isArray(raw.orders)) {
+    if (raw.orders && typeof raw.orders === "object") raw.orders = Object.values(raw.orders);
+    else raw.orders = [];
+  }
+
+  return raw;
+}
+
+function loadLocalFile() {
   if (!fs.existsSync(file)) {
-    save(defaults);
-    return structuredClone(defaults);
+    const fresh = structuredClone(defaults);
+    try {
+      fs.writeFileSync(file, JSON.stringify(fresh, null, 2), "utf8");
+    } catch (e) {}
+    return fresh;
   }
   try {
-    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-    let modified = false;
-
-    if (!raw.settings || typeof raw.settings !== "object") {
-      raw.settings = defaultSettings;
-      modified = true;
-    } else {
-      for (const [k, v] of Object.entries(defaultSettings)) {
-        if (raw.settings[k] === undefined) {
-          raw.settings[k] = v;
-          modified = true;
-        }
-      }
-    }
-
-    if (!Array.isArray(raw.products) || raw.products.length === 0 || !raw.products[0].bulk_tiers) {
-      raw.products = defaultProducts;
-      modified = true;
-    }
-
-    if (!raw.users || typeof raw.users !== "object") {
-      raw.users = {};
-      modified = true;
-    }
-
-    if (!Array.isArray(raw.deposits)) {
-      raw.deposits = [];
-      modified = true;
-    }
-
-    if (!Array.isArray(raw.orders)) {
-      raw.orders = [];
-      modified = true;
-    }
-
-    if (modified) {
-      save(raw);
-    }
-    return raw;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    return normalizeDb(parsed);
   } catch (err) {
-    console.error("Error reading database file, resetting to defaults:", err);
-    save(defaults);
+    console.error("Error reading local database file, using defaults:", err.message);
     return structuredClone(defaults);
   }
 }
 
+async function initStore() {
+  if (isFirebaseConfigured()) {
+    try {
+      initFirebase();
+      const remoteData = await fetchFirebaseData();
+      if (remoteData && (remoteData.products || remoteData.users || remoteData.settings)) {
+        console.log("📥 Loaded database snapshot from Google Firebase Realtime Database!");
+        memoryDb = normalizeDb(remoteData);
+        try {
+          fs.writeFileSync(file, JSON.stringify(memoryDb, null, 2), "utf8");
+        } catch (e) {}
+      } else {
+        console.log("📤 Initializing Firebase Realtime Database with local database seed...");
+        memoryDb = loadLocalFile();
+        saveFirebaseData(memoryDb);
+      }
+
+      // Realtime listener for console updates
+      listenFirebaseData((remoteUpdated) => {
+        if (remoteUpdated) {
+          memoryDb = normalizeDb(remoteUpdated);
+          try {
+            fs.writeFileSync(file, JSON.stringify(memoryDb, null, 2), "utf8");
+          } catch (e) {}
+        }
+      });
+      return memoryDb;
+    } catch (e) {
+      console.error("Firebase startup sync error, falling back to local file:", e.message);
+      memoryDb = loadLocalFile();
+      return memoryDb;
+    }
+  } else {
+    memoryDb = loadLocalFile();
+    return memoryDb;
+  }
+}
+
+function load() {
+  if (!memoryDb) {
+    memoryDb = loadLocalFile();
+  }
+  return memoryDb;
+}
+
 function save(db) {
-  fs.writeFileSync(file, JSON.stringify(db, null, 2), "utf8");
+  memoryDb = db;
+  try {
+    fs.writeFileSync(file, JSON.stringify(db, null, 2), "utf8");
+  } catch (e) {
+    console.error("Local file write error:", e.message);
+  }
+  if (isFirebaseConfigured()) {
+    saveFirebaseData(db);
+  }
 }
 
 // ----------------------------------------------------
@@ -214,6 +390,14 @@ function setSetting(k, v) {
 // ----------------------------------------------------
 function getProducts() {
   return load().products;
+}
+
+function getStandardProducts() {
+  return load().products.filter(p => p.category !== "api_key");
+}
+
+function getApiKeyProducts() {
+  return load().products.filter(p => p.category === "api_key");
 }
 
 function getProduct(id) {
@@ -593,10 +777,13 @@ function claimReferralReward(userId) {
 }
 
 module.exports = {
+  initStore,
   getSetting,
   getAllSettings,
   setSetting,
   getProducts,
+  getStandardProducts,
+  getApiKeyProducts,
   getProduct,
   updateProduct,
   addProduct,

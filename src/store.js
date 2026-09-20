@@ -8,6 +8,7 @@ const {
   saveFirebaseData,
   listenFirebaseData
 } = require("./firebase");
+const { defaultChannelPosts } = require("./channelPosts");
 
 const file = process.env.DATABASE_FILE || "./data/bot-data.json";
 fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -20,13 +21,19 @@ const defaultSettings = {
   group_link: process.env.FORCE_GROUP_LINK || "https://t.me/",
   force_join_enabled: false,
   bep20_usdt_address: "0xC3fC8C91A5B26C71DcD0aC1F34944FB298bCeBbF",
-  polygon_usdt_address: "0xC3fC8C91A5B26C71DcD0aC1F34944FB298bCeBbF",
+  polygon_usdt_address: "0x58F0C60b37E5c84C4C7fE4a553F1fCe6405F412b",
   binance_pay_id: "123456789",
   support_username: "@aibuyshop_support",
   referral_bonus_percent: 5,
-  min_binance_deposit: 0.50,
-  max_binance_deposit: 10.00,
-  fake_sales_broadcast_enabled: true
+  min_binance_deposit: 0.60,
+  max_binance_deposit: 100.00,
+  fake_sales_broadcast_enabled: true,
+  fake_deposits_broadcast_enabled: true,
+  channel_auto_post_enabled: true,
+  channel_post_morning_time: "10:00",
+  channel_post_evening_time: "19:30",
+  channel_post_index: 0,
+  channel_last_post_slot: ""
 };
 
 const defaultProducts = [
@@ -41,27 +48,13 @@ const defaultProducts = [
       { min: 1, max: 100, price: 0.55 },
       { min: 101, max: 999999, price: 0.50 }
     ],
-    description: `✅ 18 Months Plan
-✅ 5TB cloud storage included
-✅ You can add 5 users
-✅ No Shared
-✅ 100% Private 
-✅ NO NEED ANY CARD
-🚫 Non Warranty
-🔥 Works in any country no verification 
-✅ Links Expiry in 4-6days ( Not Plan I mean Link )
-
-❕ Important Note:
-The redeem link must be used within 24 hours of receiving the order. If you face any issue with the link, you must report it to us within 24 hours. After 24 hours, no replacement or reissue will be provided.
-🛡 100% genuine Gemini AI Pro subscription activated on your own Gmail.
-
-🛡 FULL FAMILY ACCOUNT. IT'S NOT AN INVITE
-➡️ Paste the received redeem link into your browser and click on “Activate Offer”. Your subscription/offer will then be activated successfully.`,
-    terms: `• After delivery coupons cannot be returned or refunded
-• Coupons are guaranteed to be fresh and valid
-• You must know how to use the coupon before buying
-
-By continuing you agree to these terms.`,
+    description: `✅ 18 Months Plan (Official on your Gmail)
+✅ 5TB Cloud Storage + Add 5 Family Members
+✅ 100% Private, Works in any country
+⚡️ Activate via redeem link within 24 hours`,
+    terms: `• Fresh & valid redeem link delivered instantly
+• Must redeem within 24 hours of delivery
+• Non-refundable after delivery`,
     codes: []
   },
   {
@@ -72,10 +65,8 @@ By continuing you agree to these terms.`,
     stock: 0,
     outOfStock: true,
     bulk_tiers: [],
-    description: `✅ 1 Month 4K UHD Profile
-✅ Ultra HD (4K) & HDR streaming
-✅ Works on phone, tablet, TV & PC
-✅ 100% Private Profile with PIN`,
+    description: `✅ 1 Month 4K UHD Profile (Private PIN)
+✅ Works on phone, tablet, TV & PC`,
     terms: `• No refunds after credentials are sent
 • Do not change account email or master password`,
     codes: []
@@ -92,9 +83,7 @@ By continuing you agree to these terms.`,
       { min: 51, max: 999999, price: 0.35 }
     ],
     description: `✅ Duolingo Super 12 Months
-✅ Activated on your personal account
-✅ Unlimited hearts & no ads
-✅ Offline lessons included`,
+✅ Unlimited hearts, no ads & offline lessons`,
     terms: `• Non-refundable once activated
 • Guaranteed valid for 12 months`,
     codes: []
@@ -111,9 +100,7 @@ By continuing you agree to these terms.`,
       { min: 51, max: 999999, price: 0.90 }
     ],
     description: `✅ Adobe Express Premium 12 Months
-✅ 100GB Cloud Storage
-✅ All Premium templates & fonts
-✅ Generative AI credits included`,
+✅ 100GB Cloud & Generative AI credits`,
     terms: `• Full period replacement guarantee
 • Activated directly on Adobe ID`,
     codes: []
@@ -130,9 +117,7 @@ By continuing you agree to these terms.`,
       { min: 51, max: 999999, price: 0.75 }
     ],
     description: `✅ Apple Music 5 Months Individual
-✅ Lossless & Spatial Audio with Dolby Atmos
-✅ Over 100 million songs ad-free
-✅ Download songs for offline listening`,
+✅ Lossless & Spatial Audio with Dolby Atmos`,
     terms: `• Single use promo code
 • Applicable for new and eligible returning accounts`,
     codes: []
@@ -144,20 +129,16 @@ By continuing you agree to these terms.`,
     id: "gemini_api_key",
     name: "Gemini 1.5 Pro API Key",
     category: "api_key",
-    price: 1.50,
+    price: 3.50,
     stock: 250,
     outOfStock: false,
     bulk_tiers: [
-      { min: 1, max: 10, price: 1.50 },
-      { min: 11, max: 999999, price: 1.20 }
+      { min: 1, max: 10, price: 3.50 },
+      { min: 11, max: 999999, price: 3.00 }
     ],
-    description: `✅ Official Google Gemini 1.5 Pro / Flash API Key
-✅ High TPM & RPM limits for production & dev
-✅ Full Multimodal support: Text, Vision, Audio & Documents
-✅ Direct integration: Python, Node.js, LangChain, Cursor & LobeChat
-✅ 100% Private & Instant Automated Delivery`,
-    terms: `• Key delivered instantly to your chat upon confirmation
-• Use key responsibly within Google Gemini rate limits
+    description: `✅ Official Google Gemini 1.5 Pro/Flash API Key
+✅ High TPM/RPM for Cursor, LangChain & Python`,
+    terms: `• Key delivered instantly to your chat
 • Guaranteed active & fresh on arrival`,
     codes: []
   },
@@ -165,19 +146,16 @@ By continuing you agree to these terms.`,
     id: "chatgpt_api_key",
     name: "ChatGPT OpenAI API Key ($5 / $120 Credit)",
     category: "api_key",
-    price: 2.00,
+    price: 4.50,
     stock: 180,
     outOfStock: false,
     bulk_tiers: [
-      { min: 1, max: 10, price: 2.00 },
-      { min: 11, max: 999999, price: 1.70 }
+      { min: 1, max: 10, price: 4.50 },
+      { min: 11, max: 999999, price: 4.00 }
     ],
-    description: `✅ OpenAI Official API Key (Pre-funded Tier 1 / Credits)
-✅ Full access to GPT-4o, GPT-4 Turbo, GPT-3.5 & DALL-E 3
-✅ Works seamlessly with NextChat, LibreChat, TypingMind, VS Code & Cursor
-✅ Guaranteed fresh and working`,
+    description: `✅ Official OpenAI API Key (Pre-funded Tier 1)
+✅ Full access to GPT-4o, GPT-4 Turbo & DALL-E 3`,
     terms: `• Instant automated key delivery
-• Valid for all OpenAI standard completions & embeddings
 • Replacement guarantee if invalid on arrival`,
     codes: []
   },
@@ -185,59 +163,50 @@ By continuing you agree to these terms.`,
     id: "claude_api_key",
     name: "Claude 3.5 Sonnet API Key",
     category: "api_key",
-    price: 3.00,
+    price: 6.50,
     stock: 120,
     outOfStock: false,
     bulk_tiers: [
-      { min: 1, max: 10, price: 3.00 },
-      { min: 11, max: 999999, price: 2.60 }
+      { min: 1, max: 10, price: 6.50 },
+      { min: 11, max: 999999, price: 5.80 }
     ],
     description: `✅ Anthropic Claude 3.5 Sonnet API Access
-✅ 200,000 Tokens Context Window
-✅ Best-in-class coding, reasoning & system prompts
-✅ Ready for Cline, Roo-Code, Cursor & Claude Dev`,
+✅ 200,000 Tokens for Cursor, Cline & Claude Dev`,
     terms: `• Instant automated key delivery
-• Fresh token with verified quota
-• Replacement guaranteed within 24 hours`,
+• Fresh token with verified quota`,
     codes: []
   },
   {
     id: "google_cloud_key",
     name: "Google Cloud (GCC) $300 Credits Key",
     category: "api_key",
-    price: 6.00,
+    price: 9.50,
     stock: 75,
     outOfStock: false,
     bulk_tiers: [
-      { min: 1, max: 5, price: 6.00 },
-      { min: 6, max: 999999, price: 5.00 }
+      { min: 1, max: 5, price: 9.50 },
+      { min: 6, max: 999999, price: 8.50 }
     ],
-    description: `✅ Google Cloud Console (GCC) Free Trial Token / Account
-✅ $300 Free Cloud Credits loaded
-✅ Deploy Vertex AI, Compute Engine VMs, VPS & APIs
-✅ Clean billing profile & guaranteed balance`,
-    terms: `• Digital account / credential token delivered instantly
-• Must follow Google Cloud acceptable use policy
-• Valid guarantee upon initial login`,
+    description: `✅ Google Cloud Console $300 Free Trial Credit
+✅ Deploy Vertex AI, Compute VMs & VPS`,
+    terms: `• Digital account credentials delivered instantly
+• Valid balance guaranteed on initial login`,
     codes: []
   },
   {
     id: "deepseek_api_key",
     name: "DeepSeek V3 / R1 API Key & Tokens",
     category: "api_key",
-    price: 1.20,
+    price: 2.50,
     stock: 300,
     outOfStock: false,
     bulk_tiers: [
-      { min: 1, max: 10, price: 1.20 },
-      { min: 11, max: 999999, price: 0.95 }
+      { min: 1, max: 10, price: 2.50 },
+      { min: 11, max: 999999, price: 2.00 }
     ],
-    description: `✅ DeepSeek Official API Key (DeepSeek-V3 & DeepSeek-R1)
-✅ OpenAI Compatible API endpoint
-✅ Ultra-low latency & deep reasoning capability
-✅ Preloaded tokens ready for immediate deployment`,
+    description: `✅ Official DeepSeek V3 & R1 Reasoning API Key
+✅ OpenAI compatible API with ultra-low latency`,
     terms: `• Instant automated token delivery
-• Compatible with any OpenAI client library
 • Guaranteed 100% active`,
     codes: []
   }
@@ -246,6 +215,7 @@ By continuing you agree to these terms.`,
 const defaults = {
   settings: defaultSettings,
   products: defaultProducts,
+  channel_posts: defaultChannelPosts,
   users: {},
   deposits: [],
   orders: []
@@ -261,6 +231,9 @@ function normalizeDb(raw) {
     for (const [k, v] of Object.entries(defaultSettings)) {
       if (raw.settings[k] === undefined) raw.settings[k] = v;
     }
+    if (raw.settings.min_binance_deposit < 0.60) {
+      raw.settings.min_binance_deposit = 0.60;
+    }
   }
 
   if (!Array.isArray(raw.products)) {
@@ -275,8 +248,28 @@ function normalizeDb(raw) {
     const existing = raw.products.find(p => String(p.id) === String(defP.id));
     if (!existing) {
       raw.products.push(defP);
-    } else if (!existing.category) {
-      existing.category = defP.category || "standard";
+    } else {
+      if (!existing.category) existing.category = defP.category || "standard";
+      if (existing.description === undefined) existing.description = defP.description;
+      if (existing.terms === undefined) existing.terms = defP.terms;
+      if (existing.price === undefined) existing.price = defP.price;
+      if (existing.bulk_tiers === undefined) existing.bulk_tiers = defP.bulk_tiers;
+    }
+  }
+
+  // Ensure channel_posts is populated with at least the 85+ default posts
+  if (!Array.isArray(raw.channel_posts) || raw.channel_posts.length === 0) {
+    if (raw.channel_posts && typeof raw.channel_posts === "object") {
+      raw.channel_posts = Object.values(raw.channel_posts);
+    } else {
+      raw.channel_posts = [...defaultChannelPosts];
+    }
+  }
+  if (raw.channel_posts.length < defaultChannelPosts.length) {
+    for (const cp of defaultChannelPosts) {
+      if (!raw.channel_posts.includes(cp)) {
+        raw.channel_posts.push(cp);
+      }
     }
   }
 
@@ -418,6 +411,15 @@ function addProduct(product) {
   db.products.push(product);
   save(db);
   return product;
+}
+
+function deleteProduct(id) {
+  const db = load();
+  const idx = db.products.findIndex(p => String(p.id) === String(id));
+  if (idx === -1) return false;
+  db.products.splice(idx, 1);
+  save(db);
+  return true;
 }
 
 function calculateProductPrice(product, quantity) {
@@ -776,6 +778,53 @@ function claimReferralReward(userId) {
   return { order, dispensedCode, remainingClaimable: claimable - 1 };
 }
 
+// ----------------------------------------------------
+// CHANNEL SCHEDULED POSTS
+// ----------------------------------------------------
+function getChannelPosts() {
+  const db = load();
+  if (!Array.isArray(db.channel_posts) || db.channel_posts.length === 0) {
+    db.channel_posts = [...defaultChannelPosts];
+    save(db);
+  }
+  return db.channel_posts;
+}
+
+function getNextChannelPost() {
+  const db = load();
+  const posts = getChannelPosts();
+  if (!posts || posts.length === 0) return null;
+
+  let currentIndex = Number(db.settings.channel_post_index || 0);
+  if (currentIndex >= posts.length || currentIndex < 0) {
+    currentIndex = 0;
+  }
+  const rawPost = posts[currentIndex];
+  const nextIndex = (currentIndex + 1) % posts.length;
+  db.settings.channel_post_index = nextIndex;
+  save(db);
+
+  const content = typeof rawPost === "string" ? rawPost : (rawPost.content || "");
+  const id = typeof rawPost === "object" && rawPost.id ? rawPost.id : `post_${currentIndex + 1}`;
+  const category = typeof rawPost === "object" && rawPost.category ? rawPost.category : "Promo";
+
+  return {
+    id,
+    category,
+    content,
+    postIndex: currentIndex + 1,
+    totalPosts: posts.length
+  };
+}
+
+function addChannelPost(newPost) {
+  const db = load();
+  if (!Array.isArray(db.channel_posts)) db.channel_posts = [];
+  db.channel_posts.push(newPost);
+  save(db);
+  return db.channel_posts;
+}
+
 module.exports = {
   initStore,
   getSetting,
@@ -787,6 +836,7 @@ module.exports = {
   getProduct,
   updateProduct,
   addProduct,
+  deleteProduct,
   calculateProductPrice,
   addProductCodes,
   dispenseProductCodes,
@@ -810,5 +860,8 @@ module.exports = {
   setUserVerified,
   isUserVerified,
   getReferralRewardStatus,
-  claimReferralReward
+  claimReferralReward,
+  getChannelPosts,
+  getNextChannelPost,
+  addChannelPost
 };

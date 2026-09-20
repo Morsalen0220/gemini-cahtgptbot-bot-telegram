@@ -461,15 +461,16 @@ bot.action(/^qty_custom:(.+)$/, async (ctx) => {
   );
 });
 
-// Quantity selected -> Show Product Description & Terms
+// Quantity selected -> Step 1: Show Product Information & Features
 bot.action(/^qty:(.+):(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const productId = ctx.match[1];
   const qty = Number(ctx.match[2]);
-  await showOrderConfirmation(ctx, productId, qty);
+  await showProductDetails(ctx, productId, qty);
 });
 
-async function showOrderConfirmation(ctx, productId, qty) {
+// Step 1: Product Features & Details
+async function showProductDetails(ctx, productId, qty) {
   const p = getProduct(productId);
   if (!p) return ctx.reply("❌ Product not found.");
 
@@ -488,22 +489,69 @@ async function showOrderConfirmation(ctx, productId, qty) {
     totalPrice
   };
 
-  const text = `${p.description}
-
-━━━━━━━━━━━━━━━
-✍️ Terms
-${p.terms}
-
-━━━━━━━━━━━━━━━
-📦 Order Details:
-• Product: ${p.name}
-• Quantity: ${qty}
-• Unit Price: ${money(unitPrice)}
-• Total Due: ${money(totalPrice)}`;
+  const text = `🛍️ PRODUCT DETAILS: ${p.name}
+━━━━━━━━━━━━━━━━━━━
+${p.description}`;
 
   const backMenu = p.category === "api_key" ? "menu:apikey" : "menu:buy";
   const buttons = Markup.inlineKeyboard([
-    [Markup.button.callback("✅ I have read — Continue to Payment", "order:pay_check")],
+    [Markup.button.callback(`➡️ Continue to Order (${qty}x — ${money(totalPrice)})`, `order_summary:${p.id}:${qty}`)],
+    [Markup.button.callback("🔢 Change Quantity", `prod:${p.id}`)],
+    [Markup.button.callback("❌ Cancel", backMenu)]
+  ]);
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, buttons);
+      return;
+    } catch (e) {}
+  }
+  await ctx.reply(text, buttons);
+}
+
+// User clicks Continue to Order -> Step 2: Order Summary & Terms
+bot.action(/^order_summary:(.+):(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const productId = ctx.match[1];
+  const qty = Number(ctx.match[2]);
+  await showOrderSummary(ctx, productId, qty);
+});
+
+bot.action(/^order_info:(.+):(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const productId = ctx.match[1];
+  const qty = Number(ctx.match[2]);
+  await showProductDetails(ctx, productId, qty);
+});
+
+// Step 2: Order Details, Pricing & Terms
+async function showOrderSummary(ctx, productId, qty) {
+  const p = getProduct(productId);
+  if (!p) return ctx.reply("❌ Product not found.");
+
+  const { unitPrice, totalPrice } = calculateProductPrice(p, qty);
+  ctx.session.pendingOrder = {
+    productId: p.id,
+    quantity: qty,
+    unitPrice,
+    totalPrice
+  };
+
+  const text = `📦 ORDER SUMMARY & TERMS
+━━━━━━━━━━━━━━━━━━━
+🛍️ Product: ${p.name}
+🔢 Quantity: ${qty}x
+💲 Unit Price: ${money(unitPrice)}
+💰 Total Due: ${money(totalPrice)}
+
+━━━━━━━━━━━━━━━━━━━
+✍️ Terms of Service:
+${p.terms}`;
+
+  const backMenu = p.category === "api_key" ? "menu:apikey" : "menu:buy";
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback(`✅ Agree & Pay ${money(totalPrice)}`, "order:pay_check")],
+    [Markup.button.callback("🔙 Back to Product Details", `order_info:${p.id}:${qty}`)],
     [Markup.button.callback("❌ Cancel Order", backMenu)]
   ]);
 
@@ -844,7 +892,7 @@ bot.on("text", async (ctx, next) => {
     if (isNaN(qty) || qty <= 0) {
       return ctx.reply("❌ Invalid quantity. Please enter a valid positive number.");
     }
-    return showOrderConfirmation(ctx, productId, qty);
+    return showProductDetails(ctx, productId, qty);
   }
 
   // If waiting for Binance Pay custom deposit amount

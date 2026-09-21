@@ -1,5 +1,6 @@
 require("dotenv").config();
 
+const crypto = require("crypto");
 const { Telegraf, Markup, session } = require("telegraf");
 const QRCode = require("qrcode");
 const express = require("express");
@@ -45,6 +46,7 @@ const {
   addChannelPost
 } = require("./store");
 const { getRandomCustomerName } = require("./names");
+const { getRealCryptoTransactionProof } = require("./realTransactions");
 
 const TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = String(process.env.ADMIN_TELEGRAM_ID || "");
@@ -2432,35 +2434,7 @@ function pickBroadcastDepositAmount() {
 }
 
 function generateCryptoTransactionProof() {
-  const rand = Math.random();
-  // 55% BEP20 USDT, 35% Polygon USDT, 10% Binance Pay
-  const method = rand < 0.55 ? "BEP20" : rand < 0.90 ? "POLYGON" : "BINANCE_PAY";
-
-  const rawHex = crypto.randomBytes(32).toString("hex");
-  const fullTxHash = `0x${rawHex}`;
-
-  if (method === "BEP20") {
-    return {
-      methodLabel: "USDT (BEP20)",
-      gatewayIcon: "🟡",
-      txId: fullTxHash,
-      txUrl: `https://bscscan.com/tx/${fullTxHash}`
-    };
-  } else if (method === "POLYGON") {
-    return {
-      methodLabel: "USDT (Polygon)",
-      gatewayIcon: "🟣",
-      txId: fullTxHash,
-      txUrl: `https://polygonscan.com/tx/${fullTxHash}`
-    };
-  } else {
-    return {
-      methodLabel: "Binance Pay",
-      gatewayIcon: "⚡️",
-      txId: fullTxHash,
-      txUrl: `https://bscscan.com/tx/${fullTxHash}`
-    };
-  }
+  return getRealCryptoTransactionProof();
 }
 
 async function sendGroupDepositNotice() {
@@ -2473,7 +2447,7 @@ async function sendGroupDepositNotice() {
 
   const customerName = getRandomCustomerName();
   const depositAmount = pickBroadcastDepositAmount();
-  const txProof = generateCryptoTransactionProof();
+  const txProof = getRealCryptoTransactionProof();
 
   // Short, compact format with full unmasked on-chain TxID
   const msg = `<blockquote>💰 <b>WALLET DEPOSIT CONFIRMED</b>

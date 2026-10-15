@@ -27,6 +27,7 @@ const defaultSettings = {
   referral_bonus_percent: 5,
   min_binance_deposit: 0.60,
   max_binance_deposit: 100.00,
+  min_crypto_deposit: 1.00,
   fake_sales_broadcast_enabled: true,
   fake_deposits_broadcast_enabled: true,
   channel_auto_post_enabled: true,
@@ -229,8 +230,11 @@ function normalizeDb(raw) {
     for (const [k, v] of Object.entries(defaultSettings)) {
       if (raw.settings[k] === undefined) raw.settings[k] = v;
     }
-    if (raw.settings.min_binance_deposit < 0.60) {
+    if (typeof raw.settings.min_binance_deposit !== "number" || isNaN(raw.settings.min_binance_deposit) || raw.settings.min_binance_deposit <= 0) {
       raw.settings.min_binance_deposit = 0.60;
+    }
+    if (typeof raw.settings.min_crypto_deposit !== "number" || isNaN(raw.settings.min_crypto_deposit) || raw.settings.min_crypto_deposit <= 0) {
+      raw.settings.min_crypto_deposit = 1.00;
     }
   }
 

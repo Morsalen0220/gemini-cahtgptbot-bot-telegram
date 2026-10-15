@@ -723,18 +723,21 @@ bot.action("order:execute_pay", async (ctx) => {
 bot.action(/^deposit:start(?::([\d.]+))?$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const suggestedAmount = ctx.match[1] ? Number(ctx.match[1]) : 1.0;
+  const settings = getAllSettings();
+  const minBinance = Number(settings.min_binance_deposit || 0.60);
+  const minCrypto = Number(settings.min_crypto_deposit || 1.00);
 
   const text = `💳 <b>SELECT DEPOSIT METHOD</b>
 ━━━━━━━━━━━━━━━━━━━
 Please choose your preferred deposit gateway:
-• <b>Binance Pay:</b> Instant C2C (Min: <b>$0.60 USDT</b>)
-• <b>USDT (BEP20):</b> BNB Smart Chain (Min: <b>$1.00 USDT</b>)
-• <b>USDT (Polygon):</b> Polygon / POL (Min: <b>$1.00 USDT</b>)`;
+• <b>Binance Pay:</b> Instant C2C (Min: <b>$${minBinance.toFixed(2)} USDT</b>)
+• <b>USDT (BEP20):</b> BNB Smart Chain (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)
+• <b>USDT (Polygon):</b> Polygon / POL (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)`;
 
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback("🟡 USDT (BEP20 / BSC)", `deposit:bep20:${suggestedAmount}`)],
     [Markup.button.callback("🟣 USDT (Polygon / POL)", `deposit:polygon:${suggestedAmount}`)],
-    [Markup.button.callback("⚡ Binance Pay (Min $0.60)", `deposit:binance:${suggestedAmount}`)],
+    [Markup.button.callback(`⚡ Binance Pay (Min $${minBinance.toFixed(2)})`, `deposit:binance:${suggestedAmount}`)],
     [Markup.button.callback("🔙 Back to Wallet", "menu:wallet")]
   ]);
 
@@ -758,16 +761,18 @@ bot.action(/^deposit:binance(?::([\d.]+))?$/, async (ctx) => {
   const min = Number(settings.min_binance_deposit || 0.60);
   const text = `🟡 <b>DEPOSIT VIA BINANCE PAY</b>
 ━━━━━━━━━━━━━━━━━━━
-Type any amount in USDT you want to deposit (Minimum: <b>$0.60 USDT</b>).
+Type any amount in USDT you want to deposit (Minimum: <b>$${min.toFixed(2)} USDT</b>).
 Or select a quick amount below:`;
 
+  const quickAmounts = [
+    min,
+    Number((min + 0.40).toFixed(2)),
+    5.00,
+    10.00
+  ].filter((v, i, a) => a.indexOf(v) === i && v >= min).slice(0, 4);
+
   const buttons = Markup.inlineKeyboard([
-    [
-      Markup.button.callback("0.60 USDT", `dep_bin_set:0.60`),
-      Markup.button.callback("1.00 USDT", `dep_bin_set:1.00`),
-      Markup.button.callback("5.00 USDT", `dep_bin_set:5.00`),
-      Markup.button.callback("10.00 USDT", `dep_bin_set:10.00`)
-    ],
+    quickAmounts.map((amt) => Markup.button.callback(`${amt.toFixed(2)} USDT`, `dep_bin_set:${amt.toFixed(2)}`)),
     [Markup.button.callback("🔙 Back", "deposit:start")]
   ]);
 
@@ -853,7 +858,8 @@ async function showBep20DepositInstructions(ctx, amount) {
   const settings = getAllSettings();
   const user = getOrCreateUser(ctx.from);
   const bep20Address = settings.bep20_usdt_address || "0xC3fC8C91A5B26C71DcD0aC1F34944FB298bCeBbF";
-  const finalAmount = Math.max(1.0, Number(amount) || 1.0);
+  const minCrypto = Number(settings.min_crypto_deposit || 1.00);
+  const finalAmount = Math.max(minCrypto, Number(amount) || minCrypto);
 
   const deposit = createDeposit({
     user_id: user.id,
@@ -868,7 +874,7 @@ async function showBep20DepositInstructions(ctx, amount) {
   const text = `🟡 <b>USDT DEPOSIT (BEP20 / BSC)</b>
 ━━━━━━━━━━━━━━━━━━━
 💰 <b>Network:</b> <b>BNB Smart Chain (BEP20)</b>
-💵 <b>Minimum Deposit:</b> <b>1.00 USDT</b>
+💵 <b>Minimum Deposit:</b> <b>${minCrypto.toFixed(2)} USDT</b>
 <i>(Wallet is credited automatically upon on-chain arrival)</i>
 
 ━━━━━━━━━━━━━━━━━━━
@@ -900,7 +906,8 @@ async function showPolygonDepositInstructions(ctx, amount) {
   const settings = getAllSettings();
   const user = getOrCreateUser(ctx.from);
   const polygonAddress = settings.polygon_usdt_address || "0x58F0C60b37E5c84C4C7fE4a553F1fCe6405F412b";
-  const finalAmount = Math.max(1.0, Number(amount) || 1.0);
+  const minCrypto = Number(settings.min_crypto_deposit || 1.00);
+  const finalAmount = Math.max(minCrypto, Number(amount) || minCrypto);
 
   const deposit = createDeposit({
     user_id: user.id,
@@ -915,7 +922,7 @@ async function showPolygonDepositInstructions(ctx, amount) {
   const text = `🟣 <b>USDT DEPOSIT (POLYGON / MATIC)</b>
 ━━━━━━━━━━━━━━━━━━━
 💰 <b>Network:</b> <b>Polygon (POL / MATIC)</b>
-💵 <b>Minimum Deposit:</b> <b>1.00 USDT</b>
+💵 <b>Minimum Deposit:</b> <b>${minCrypto.toFixed(2)} USDT</b>
 <i>(Wallet is credited automatically upon on-chain arrival)</i>
 
 ━━━━━━━━━━━━━━━━━━━
@@ -988,7 +995,7 @@ bot.on("text", async (ctx, next) => {
     const settings = getAllSettings();
     const min = Number(settings.min_binance_deposit || 0.60);
     if (isNaN(amt) || amt < min) {
-      return ctx.reply(`❌ Invalid amount. Minimum Binance Pay deposit is ${money(min)} USDT.`);
+      return ctx.reply(`❌ Invalid amount. Minimum Binance Pay deposit is ${money(min)}.`);
     }
     return showBinancePayInstructions(ctx, amt);
   }
@@ -1400,20 +1407,24 @@ bot.action("refer:progress_info", async (ctx) => {
 async function showSupport(ctx) {
   if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
   const settings = getAllSettings();
+  const rawSupport = settings.support_username || "@aibuyshop_support";
+  const cleanSupport = rawSupport.replace(/^https?:\/\/t\.me\//, "").replace("@", "").trim();
+  const supportDisplay = cleanSupport ? `@${cleanSupport}` : "@aibuyshop_support";
+  const supportUrl = `https://t.me/${cleanSupport || "aibuyshop_support"}`;
 
   const text = `💬 CUSTOMER SUPPORT
 
 Need assistance with an order, redeem link, or deposit?
 Our team is available 24/7.
 
-👤 Admin Support: ${settings.support_username || "@aibuyshop_support"}
+👤 Admin Support: ${supportDisplay}
 📢 Channel: ${settings.channel_link}
 👥 Group: ${settings.group_link}
 
 Please include your Order Code or Deposit ID when contacting support for fastest assistance!`;
 
   const buttons = Markup.inlineKeyboard([
-    [Markup.button.url("💬 Contact Support", `https://t.me/${(settings.support_username || "aibuyshop_support").replace("@", "")}`)],
+    [Markup.button.url("💬 Contact Support", supportUrl)],
     [Markup.button.callback("🔙 Main Menu", "menu:main")]
   ]);
 
@@ -1877,6 +1888,8 @@ bot.action("adm:settings", async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
   const s = getAllSettings();
+  const minBinance = Number(s.min_binance_deposit ?? 0.60);
+  const minCrypto = Number(s.min_crypto_deposit ?? 1.00);
 
   const text = `⚙️ BOT SETTINGS & CONFIGURATION:
 
@@ -1888,7 +1901,9 @@ bot.action("adm:settings", async (ctx) => {
 • USDT BEP20 Address: ${s.bep20_usdt_address}
 • USDT Polygon Address: ${s.polygon_usdt_address || s.bep20_usdt_address}
 • Binance Pay ID: ${s.binance_pay_id}
-• Support Handle: ${s.support_username}
+• Support Handle: ${s.support_username || "Not Set"}
+• Min Binance Deposit: $${minBinance.toFixed(2)} USDT
+• Min Crypto Deposit: $${minCrypto.toFixed(2)} USDT
 • Group Sales Broadcast: ${s.fake_sales_broadcast_enabled !== false ? "✅ ENABLED (~2 mins)" : "❌ DISABLED"}
 • Group Deposits Broadcast: ${s.fake_deposits_broadcast_enabled !== false ? "✅ ENABLED (~20 mins)" : "❌ DISABLED"}`;
 
@@ -1904,10 +1919,16 @@ bot.action("adm:settings", async (ctx) => {
     ],
     [Markup.button.callback("✏️ Edit Channel", "adm_set_chan"), Markup.button.callback("✏️ Edit Group", "adm_set_grp")],
     [Markup.button.callback("✏️ Edit BEP20 USDT", "adm_set_bep20"), Markup.button.callback("✏️ Edit Polygon USDT", "adm_set_polygon")],
-    [Markup.button.callback("✏️ Edit Binance Pay ID", "adm_set_binpay")],
+    [Markup.button.callback("✏️ Edit Binance Pay ID", "adm_set_binpay"), Markup.button.callback("✏️ Edit Support", "adm_set_support")],
+    [Markup.button.callback("✏️ Edit Min Binance Dep", "adm_set_min_binance"), Markup.button.callback("✏️ Edit Min Crypto Dep", "adm_set_min_crypto")],
     [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
   ]);
 
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, buttons);
+    } catch (e) {}
+  }
   await ctx.reply(text, buttons);
 });
 
@@ -1994,6 +2015,38 @@ bot.action("adm_set_binpay", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   ctx.session.adminAction = { type: "set_binance_pay" };
   await ctx.reply("Enter new Binance Pay ID:");
+});
+
+bot.action("adm_set_support", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "set_support" };
+  await ctx.reply(
+    "👤 Enter new Admin Support Telegram username or link (e.g. `@my_support` or `https://t.me/my_support`):",
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:settings")]])
+  );
+});
+
+bot.action(["adm_set_min_binance", "adm_set_mindep"], async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "set_min_binance" };
+  const current = Number(getSetting("min_binance_deposit") || 0.60).toFixed(2);
+  await ctx.reply(
+    `💰 Current Minimum Binance Pay Deposit: $${current} USDT\n\nEnter new Minimum Deposit amount in USDT (e.g. 0.50 or 1.00):`,
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:settings")]])
+  );
+});
+
+bot.action("adm_set_min_crypto", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "set_min_crypto" };
+  const current = Number(getSetting("min_crypto_deposit") || 1.00).toFixed(2);
+  await ctx.reply(
+    `💰 Current Minimum Crypto (BEP20 / Polygon) Deposit: $${current} USDT\n\nEnter new Minimum Deposit amount in USDT (e.g. 1.00 or 2.00):`,
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:settings")]])
+  );
 });
 
 // Admin: Broadcast
@@ -2184,6 +2237,56 @@ async function handleAdminTextInput(ctx, text) {
     case "set_binance_pay": {
       setSetting("binance_pay_id", text);
       return ctx.reply(`✅ Binance Pay ID updated to: ${text}`);
+    }
+    case "set_support": {
+      let raw = text.trim();
+      if (raw.includes("t.me/")) {
+        raw = raw.split("t.me/")[1].replace("/", "").trim();
+      }
+      raw = raw.replace("@", "").trim();
+      if (!raw) {
+        return ctx.reply("❌ Invalid support username. Please enter a valid Telegram username.");
+      }
+      const username = "@" + raw;
+      setSetting("support_username", username);
+      return ctx.reply(
+        `✅ Support Username updated successfully to: <b>${username}</b>\nLink: https://t.me/${raw}`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([[Markup.button.callback("⚙️ Back to Settings", "adm:settings")]])
+        }
+      );
+    }
+    case "set_min_binance":
+    case "set_min_deposit": {
+      const minAmt = parseFloat(text.replace("$", "").trim());
+      if (isNaN(minAmt) || minAmt <= 0) {
+        return ctx.reply("❌ Invalid amount. Please enter a positive number (e.g. 0.50 or 1.00).");
+      }
+      const cleanAmt = Number(minAmt.toFixed(2));
+      setSetting("min_binance_deposit", cleanAmt);
+      return ctx.reply(
+        `✅ <b>Minimum Binance Pay Deposit</b> updated to <b>$${cleanAmt.toFixed(2)} USDT</b>!`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([[Markup.button.callback("⚙️ Back to Settings", "adm:settings")]])
+        }
+      );
+    }
+    case "set_min_crypto": {
+      const minAmt = parseFloat(text.replace("$", "").trim());
+      if (isNaN(minAmt) || minAmt <= 0) {
+        return ctx.reply("❌ Invalid amount. Please enter a positive number (e.g. 1.00 or 2.00).");
+      }
+      const cleanAmt = Number(minAmt.toFixed(2));
+      setSetting("min_crypto_deposit", cleanAmt);
+      return ctx.reply(
+        `✅ <b>Minimum Crypto (BEP20 / Polygon) Deposit</b> updated to <b>$${cleanAmt.toFixed(2)} USDT</b>!`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([[Markup.button.callback("⚙️ Back to Settings", "adm:settings")]])
+        }
+      );
     }
     case "broadcast": {
       const users = getAllUsers();

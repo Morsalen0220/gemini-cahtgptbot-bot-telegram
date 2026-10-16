@@ -977,6 +977,25 @@ bot.action(/^deposit_paid:(.+)$/, async (ctx) => {
 bot.on("text", async (ctx, next) => {
   const text = ctx.message.text.trim();
 
+  // Customer replies to an admin-sent message; forward it to the admin inbox.
+  if (!isAdmin(ctx) && ctx.session.awaitingSupportReply) {
+    ctx.session.awaitingSupportReply = false;
+    const from = ctx.from || {};
+    const name = [from.first_name, from.last_name].filter(Boolean).join(" ") || "Customer";
+    const username = from.username ? `@${from.username}` : "Not set";
+    try {
+      await bot.telegram.sendMessage(
+        ADMIN_ID,
+        `📩 CUSTOMER REPLY\n\n👤 ${name} (${username})\n🆔 Telegram ID: ${from.id}\n\n${text}`,
+        Markup.inlineKeyboard([[Markup.button.callback("↩️ Reply to Customer", `adm:reply_customer:${from.id}`)]])
+      );
+      return ctx.reply("✅ Your reply has been sent to support.");
+    } catch (e) {
+      console.error("Failed to forward customer reply:", e.message || e);
+      return ctx.reply("❌ Could not send your reply right now. Please try again later.");
+    }
+  }
+
   // If waiting for custom product quantity
   if (ctx.session.awaitingCustomQty) {
     const productId = ctx.session.awaitingCustomQty;
@@ -1027,6 +1046,13 @@ bot.on("text", async (ctx, next) => {
         Markup.inlineKeyboard([[Markup.button.callback("👛 View Wallet", "menu:wallet")]])
       );
     }
+  }
+
+  // Allow admins to cancel an in-progress customer message or other text action.
+  if (isAdmin(ctx) && text.trim() === "/cancel" && ctx.session.adminAction) {
+    ctx.session.adminAction = null;
+    await ctx.reply("❎ Action cancelled.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Admin Menu", "adm:menu")]]));
+    return;
   }
 
   // Admin state handlers
@@ -1501,6 +1527,7 @@ Select an action below:`;
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback(`📥 Pending Deposits (${pendingDeps})`, "adm:deposits")],
     [Markup.button.callback("🛍️ Products & Inventory", "adm:products")],
+    [Markup.button.callback("👥 Customers & Direct Messages", "adm:customers:0")],
     [Markup.button.callback("👤 User Balance Adjuster", "adm:user_bal")],
     [Markup.button.callback("⚙️ Force Join & Payment Settings", "adm:settings")],
     [Markup.button.callback("📢 Channel Auto-Poster (2x/Day)", "adm:channel_poster")],
@@ -1515,6 +1542,97 @@ Select an action below:`;
   }
   await ctx.reply(text, buttons);
 }
+
+// Customer taps this button under any admin message to reply through the bot.
+bot.action("customer:reply", async (ctx) => {
+  if (isAdmin(ctx)) {
+    await ctx.answerCbQuery("This button is for customers.").catch(() => {});
+    return;
+  }
+  ctx.session.awaitingSupportReply = true;
+  await ctx.answerCbQuery().catch(() => {});
+  return ctx.reply("✍️ Type your reply here and send it. Your message will be delivered to the admin.",
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel Reply", "customer:cancel_reply")]]));
+});
+
+bot.action("customer:cancel_reply", async (ctx) => {
+  ctx.session.awaitingSupportReply = false;
+  await ctx.answerCbQuery("Reply cancelled.").catch(() => {});
+  return ctx.reply("Reply cancelled.");
+});
+
+// Admin taps this button on an incoming customer message to reply directly.
+bot.action(/^adm:reply_customer:(\d+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const userId = String(ctx.match[1]);
+  const user = getUser(userId);
+  if (!user) return ctx.reply("❌ Customer not found.");
+  ctx.session.adminAction = { type: "customer_reply", userId };
+  const name = [user.first_name, user.last_name].filter(Boolean).join(" ") || userId;
+  return ctx.reply(`↩️ Write your reply to ${name} (ID: ${userId}).\n\nSend /cancel to cancel.`);
+});
+
+// Admin: Customer directory with pagination and one-to-one messaging.
+const CUSTOMER_PAGE_SIZE = 8;
+
+bot.action(/^adm:customers:(\d+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const users = getAllUsers().sort((a, b) => {
+    const aTime = Date.parse(a.created_at || 0) || 0;
+    const bTime = Date.parse(b.created_at || 0) || 0;
+    return bTime - aTime;
+  });
+  const pageCount = Math.max(1, Math.ceil(users.length / CUSTOMER_PAGE_SIZE));
+  const page = Math.min(Number(ctx.match[1]) || 0, pageCount - 1);
+  const visible = users.slice(page * CUSTOMER_PAGE_SIZE, (page + 1) * CUSTOMER_PAGE_SIZE);
+
+  let text = `👥 CUSTOMERS (${users.length})\nPage ${page + 1}/${pageCount}\n\n`;
+  const rows = visible.map((u) => {
+    const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || "Unnamed customer";
+    const username = u.username ? ` @${u.username}` : "";
+    text += `👤 ${name}${username}\n🆔 ${u.id}  •  Wallet: ${money(Number(u.wallet_balance || 0))}\n\n`;
+    return [Markup.button.callback(`${name.slice(0, 24)} · ${u.id}`, `adm:customer:${u.id}`)];
+  });
+  const nav = [];
+  if (page > 0) nav.push(Markup.button.callback("⬅️ Previous", `adm:customers:${page - 1}`));
+  if (page < pageCount - 1) nav.push(Markup.button.callback("Next ➡️", `adm:customers:${page + 1}`));
+  if (nav.length) rows.push(nav);
+  rows.push([Markup.button.callback("📢 Message All Customers", "adm:broadcast")]);
+  rows.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
+
+  const markup = Markup.inlineKeyboard(rows);
+  if (ctx.callbackQuery) {
+    try { return await ctx.editMessageText(text, markup); } catch (_) {}
+  }
+  return ctx.reply(text, markup);
+});
+
+bot.action(/^adm:customer:(\d+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const userId = ctx.match[1];
+  const u = getUser(userId);
+  if (!u) return ctx.reply("❌ Customer not found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Customers", "adm:customers:0")]]));
+  const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || "Unnamed customer";
+  const details = `👤 CUSTOMER DETAILS\n\nName: ${name}\nUsername: ${u.username ? `@${u.username}` : "Not set"}\nTelegram ID: ${u.id}\nWallet: ${money(Number(u.wallet_balance || 0))}\nTotal spent: ${money(Number(u.total_spent || 0))}\nOrders: ${Number(u.orders_count || 0)}\nJoined: ${u.created_at || "Unknown"}`;
+  return ctx.reply(details, Markup.inlineKeyboard([
+    [Markup.button.callback("✉️ Send Message", `adm:customer_msg:${u.id}`)],
+    [Markup.button.callback("🔙 Customers", "adm:customers:0")]
+  ]));
+});
+
+bot.action(/^adm:customer_msg:(\d+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const userId = ctx.match[1];
+  const user = getUser(userId);
+  if (!user) return ctx.reply("❌ Customer not found.");
+  ctx.session.adminAction = { type: "customer_message", userId: String(user.id) };
+  const name = [user.first_name, user.last_name].filter(Boolean).join(" ") || String(user.id);
+  return ctx.reply(`✉️ Write the message for ${name} (ID: ${user.id}).\n\nSend /cancel to cancel.`);
+});
 
 // Admin: Pending Deposits
 bot.action("adm:deposits", async (ctx) => {
@@ -2288,16 +2406,53 @@ async function handleAdminTextInput(ctx, text) {
         }
       );
     }
+    case "customer_message": {
+      const user = getUser(action.userId);
+      if (!user) return ctx.reply("❌ Customer not found; message was not sent.");
+      try {
+        await bot.telegram.sendMessage(user.id, text, Markup.inlineKeyboard([
+          [Markup.button.callback("↩️ Reply", "customer:reply")]
+        ]));
+        return ctx.reply(`✅ Message sent to ${user.first_name || user.id}.`, Markup.inlineKeyboard([
+          [Markup.button.callback("👥 Back to Customers", "adm:customers:0")],
+          [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+        ]));
+      } catch (e) {
+        return ctx.reply(`❌ Could not message customer ${user.id}. They may have blocked the bot or never started it.\nReason: ${e.description || e.message || "Telegram API error"}`);
+      }
+    }
+    case "customer_reply": {
+      const user = getUser(action.userId);
+      if (!user) return ctx.reply("❌ Customer not found; reply was not sent.");
+      try {
+        await bot.telegram.sendMessage(user.id, text, Markup.inlineKeyboard([
+          [Markup.button.callback("↩️ Reply", "customer:reply")]
+        ]));
+        return ctx.reply(`✅ Reply sent to ${user.first_name || user.id}.`, Markup.inlineKeyboard([
+          [Markup.button.callback("👥 Back to Customers", "adm:customers:0")],
+          [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+        ]));
+      } catch (e) {
+        return ctx.reply(`❌ Could not reply to customer ${user.id}. They may have blocked the bot.\nReason: ${e.description || e.message || "Telegram API error"}`);
+      }
+    }
     case "broadcast": {
       const users = getAllUsers();
       let sent = 0;
+      let failed = 0;
       for (const u of users) {
         try {
-          await bot.telegram.sendMessage(u.id, text);
+          await bot.telegram.sendMessage(u.id, text, Markup.inlineKeyboard([
+            [Markup.button.callback("↩️ Reply", "customer:reply")]
+          ]));
           sent++;
-        } catch (e) {}
+        } catch (e) {
+          failed++;
+        }
+        // Keep broadcast traffic below Telegram's usual per-chat delivery limits.
+        await new Promise(resolve => setTimeout(resolve, 40));
       }
-      return ctx.reply(`📢 Broadcast sent to ${sent}/${users.length} users.`);
+      return ctx.reply(`📢 Broadcast completed.\n✅ Sent: ${sent}\n❌ Failed: ${failed}\n👥 Total customers: ${users.length}`);
     }
     default:
       return ctx.reply("Unknown action.");
@@ -2699,6 +2854,7 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.RENDER_EXTERNAL_URL;
 
 let server;
 let isShuttingDown = false;
+let pollingStarted = false;
 
 async function startApp() {
   // Initialize persistent database (Google Firebase or local file fallback)
@@ -2743,6 +2899,7 @@ async function startApp() {
         dropPendingUpdates: false
       })
         .then(() => {
+          pollingStarted = true;
           console.log("Telegram Gemini AI Shop bot started successfully (polling mode).");
           if (!isBroadcasterStarted) {
             isBroadcasterStarted = true;
@@ -2772,11 +2929,31 @@ startApp().catch((err) => {
 // GRACEFUL SHUTDOWN
 // =====================================================
 const stopApp = (signal) => {
+  if (isShuttingDown) return;
+
   console.log(`Stopping bot and server on ${signal}...`);
   isShuttingDown = true;
-  if (channelPosterInterval) clearInterval(channelPosterInterval);
-  if (server) server.close();
-  bot.stop(signal);
+
+  if (channelPosterInterval) {
+    clearInterval(channelPosterInterval);
+    channelPosterInterval = null;
+  }
+
+  if (server) {
+    server.close();
+    server = null;
+  }
+
+  // Telegraf's stop() is for polling mode, not webhook mode.
+  // Also avoid calling it before polling has actually started.
+  if (!WEBHOOK_URL && pollingStarted) {
+    try {
+      bot.stop(signal);
+      pollingStarted = false;
+    } catch (error) {
+      console.error("Bot shutdown warning:", error.message || error);
+    }
+  }
 };
 
 process.once("SIGINT", () => stopApp("SIGINT"));

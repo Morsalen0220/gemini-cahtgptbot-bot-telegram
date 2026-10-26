@@ -34,7 +34,9 @@ const defaultSettings = {
   channel_post_morning_time: "10:00",
   channel_post_evening_time: "19:30",
   channel_post_index: 0,
-  channel_last_post_slot: ""
+  channel_last_post_slot: "",
+  deposit_paid_auto_msg: "⏳ Thank you for clicking I've Paid! We are verifying your payment. Please make sure to send your Transaction Hash (TxID) or screenshot if you haven't already. Your balance will be added shortly!",
+  deposit_second_auto_msg: "✅ We have received your payment screenshot! Our admin team is reviewing your proof now and your wallet balance will be credited shortly."
 };
 
 const defaultProducts = [
@@ -553,6 +555,47 @@ function getAllUsers() {
   return Object.values(load().users);
 }
 
+function markDepositAutoMsgSent(userId) {
+  const db = load();
+  const idStr = String(userId);
+  if (!db.users[idStr]) {
+    db.users[idStr] = {
+      id: Number(userId) || userId,
+      wallet_balance: 0.0,
+      total_spent: 0.0,
+      orders_count: 0,
+      deposit_paid_clicks: 1,
+      deposit_auto_msg_sent: true,
+      created_at: new Date().toISOString()
+    };
+    save(db);
+    return true;
+  }
+  db.users[idStr].deposit_paid_clicks = (db.users[idStr].deposit_paid_clicks || 0) + 1;
+  if (db.users[idStr].deposit_auto_msg_sent) {
+    save(db);
+    return false;
+  }
+  db.users[idStr].deposit_auto_msg_sent = true;
+  save(db);
+  return true;
+}
+
+function markSecondDepositScreenshotMsgSent(userId) {
+  const db = load();
+  const idStr = String(userId);
+  const u = db.users[idStr];
+  if (!u) return false;
+  // Trigger strictly when user has clicked "I've Paid" at least a 2nd time AND sent a screenshot, only once per user
+  const isSecondTime = (u.deposit_paid_clicks || 0) >= 2;
+  if (!isSecondTime || u.deposit_second_auto_msg_sent) {
+    return false;
+  }
+  u.deposit_second_auto_msg_sent = true;
+  save(db);
+  return true;
+}
+
 // ----------------------------------------------------
 // DEPOSITS
 // ----------------------------------------------------
@@ -850,6 +893,8 @@ module.exports = {
   regenerateApiKey,
   getUserByApiKey,
   getAllUsers,
+  markDepositAutoMsgSent,
+  markSecondDepositScreenshotMsgSent,
   createDeposit,
   getDeposit,
   approveDeposit,

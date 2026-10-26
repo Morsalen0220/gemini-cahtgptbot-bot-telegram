@@ -26,6 +26,8 @@ const {
   regenerateApiKey,
   getUserByApiKey,
   getAllUsers,
+  markDepositAutoMsgSent,
+  markSecondDepositScreenshotMsgSent,
   createDeposit,
   getDeposit,
   approveDeposit,
@@ -963,10 +965,60 @@ bot.action(/^deposit_paid:(.+)$/, async (ctx) => {
   ctx.session.awaitingProofForDeposit = depositId;
 
   await ctx.reply(
-    `📩 Please send your Transaction Hash (TxID) or payment screenshot below for Deposit <b>${depositId}</b>:`,
+    `📩 Please send your Transaction Hash (TxID) or payment screenshot below for Deposit <b>${depositId}</b>, or tap <b>"✅ Submit Without Proof"</b> below:`,
     {
       parse_mode: "HTML",
-      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "menu:wallet")]])
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("✅ Submit Without TxID / Screenshot", `deposit_submit_noproof:${depositId}`)],
+        [Markup.button.callback("❌ Cancel", "menu:wallet")]
+      ])
+    }
+  );
+
+  // Send 1st automatic message 15 seconds after clicking "I've Paid" (only the first time per user ID)
+  const targetUserId = ctx.from?.id || deposit.user_id;
+  if (targetUserId && markDepositAutoMsgSent(targetUserId)) {
+    setTimeout(() => {
+      const autoMsg = getSetting("deposit_paid_auto_msg");
+      if (autoMsg && String(autoMsg).trim()) {
+        bot.telegram.sendMessage(
+          targetUserId,
+          String(autoMsg).trim(),
+          Markup.inlineKeyboard([
+            [
+              Markup.button.callback("🛍️ Buy", "menu:buy"),
+              Markup.button.callback("💳 Add Funds / Deposit", "deposit:start")
+            ],
+            [
+              Markup.button.callback("↩️ Reply", "customer:reply")
+            ]
+          ])
+        ).catch(() => {});
+      }
+    }, 15 * 1000);
+  }
+});
+
+// User submits deposit without providing TxID or screenshot
+bot.action(/^deposit_submit_noproof:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const depositId = ctx.match[1];
+  const deposit = getDeposit(depositId);
+
+  if (!deposit) {
+    return ctx.reply("❌ Deposit session not found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Wallet", "menu:wallet")]]));
+  }
+
+  ctx.session.awaitingProofForDeposit = null;
+  deposit.proof = "Submitted without TxID / Screenshot";
+  deposit.updated_at = new Date().toISOString();
+  await notifyAdminNewDeposit(ctx, deposit);
+
+  return ctx.reply(
+    `✅ Thank you! Your Deposit <b>${depositId}</b> has been submitted.\n\nOur team is verifying the payment and your balance will be credited shortly!`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("👛 View Wallet", "menu:wallet")]])
     }
   );
 });
@@ -1077,6 +1129,30 @@ bot.on("photo", async (ctx, next) => {
       deposit.proof = ctx.message.caption || "Screenshot submitted";
       deposit.updated_at = new Date().toISOString();
       await notifyAdminNewDeposit(ctx, deposit, fileId);
+
+      // If this is the 2nd time the user clicked "I've Paid" and submitted a screenshot as proof, send the 2nd auto-message
+      const targetUserId = ctx.from?.id || deposit.user_id;
+      if (targetUserId && markSecondDepositScreenshotMsgSent(targetUserId)) {
+        setTimeout(() => {
+          const secondMsg = getSetting("deposit_second_auto_msg");
+          if (secondMsg && String(secondMsg).trim()) {
+            bot.telegram.sendMessage(
+              targetUserId,
+              String(secondMsg).trim(),
+              Markup.inlineKeyboard([
+                [
+                  Markup.button.callback("🛍️ Buy", "menu:buy"),
+                  Markup.button.callback("💳 Add Funds / Deposit", "deposit:start")
+                ],
+                [
+                  Markup.button.callback("↩️ Reply", "customer:reply")
+                ]
+              ])
+            ).catch(() => {});
+          }
+        }, 15 * 1000);
+      }
+
       return ctx.reply(
         `✅ Thank you! Your screenshot for Deposit ${depositId} has been submitted.\n\nAdmin will verify and credit your wallet shortly!`,
         Markup.inlineKeyboard([[Markup.button.callback("👛 View Wallet", "menu:wallet")]])
@@ -1100,6 +1176,9 @@ async function notifyAdminNewDeposit(ctx, deposit, photoFileId = null) {
     [
       Markup.button.callback(`✅ Approve (${money(deposit.amount)})`, `adm_dep_app:${deposit.id}`),
       Markup.button.callback("❌ Reject", `adm_dep_rej:${deposit.id}`)
+    ],
+    [
+      Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`)
     ]
   ]);
 
@@ -1125,10 +1204,13 @@ bot.action(/^adm_dep_app:(.+)$/, async (ctx) => {
   try {
     const { deposit, user } = approveDeposit(depositId);
     const textMsg = `✅ DEPOSIT APPROVED!\nDeposit ID: ${deposit.id}\nUser: ${deposit.user_name}\nCredited: ${money(deposit.amount)}\nUser New Balance: ${money(user.wallet_balance)}`;
+    const afterButtons = Markup.inlineKeyboard([
+      [Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`)]
+    ]);
     if (ctx.callbackQuery.message.photo) {
-      await ctx.editMessageCaption(textMsg);
+      await ctx.editMessageCaption(textMsg, afterButtons);
     } else {
-      await ctx.editMessageText(textMsg);
+      await ctx.editMessageText(textMsg, afterButtons);
     }
 
     // Notify user in private chat
@@ -1149,10 +1231,13 @@ bot.action(/^adm_dep_rej:(.+)$/, async (ctx) => {
   try {
     const deposit = rejectDeposit(depositId);
     const textMsg = `❌ DEPOSIT REJECTED!\nDeposit ID: ${deposit.id}\nUser: ${deposit.user_name}`;
+    const afterButtons = Markup.inlineKeyboard([
+      [Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`)]
+    ]);
     if (ctx.callbackQuery.message.photo) {
-      await ctx.editMessageCaption(textMsg);
+      await ctx.editMessageCaption(textMsg, afterButtons);
     } else {
-      await ctx.editMessageText(textMsg);
+      await ctx.editMessageText(textMsg, afterButtons);
     }
 
     bot.telegram.sendMessage(
@@ -1528,6 +1613,9 @@ Select an action below:`;
     [Markup.button.callback(`📥 Pending Deposits (${pendingDeps})`, "adm:deposits")],
     [Markup.button.callback("🛍️ Products & Inventory", "adm:products")],
     [Markup.button.callback("👥 Customers & Direct Messages", "adm:customers:0")],
+    [Markup.button.callback("🆔 Message by Telegram ID", "adm:msg_by_id")],
+    [Markup.button.callback("⏱️ Set 1st Deposit Auto-Msg (15s)", "adm_set_dep_auto_msg")],
+    [Markup.button.callback("📸 Set 2nd Deposit Auto-Msg (Screenshot)", "adm_set_dep_second_msg")],
     [Markup.button.callback("👤 User Balance Adjuster", "adm:user_bal")],
     [Markup.button.callback("⚙️ Force Join & Payment Settings", "adm:settings")],
     [Markup.button.callback("📢 Channel Auto-Poster (2x/Day)", "adm:channel_poster")],
@@ -1567,10 +1655,20 @@ bot.action(/^adm:reply_customer:(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const userId = String(ctx.match[1]);
   const user = getUser(userId);
-  if (!user) return ctx.reply("❌ Customer not found.");
   ctx.session.adminAction = { type: "customer_reply", userId };
-  const name = [user.first_name, user.last_name].filter(Boolean).join(" ") || userId;
+  const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || userId) : userId;
   return ctx.reply(`↩️ Write your reply to ${name} (ID: ${userId}).\n\nSend /cancel to cancel.`);
+});
+
+// Admin: Message customer directly by Telegram ID
+bot.action("adm:msg_by_id", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "msg_by_id_prompt" };
+  return ctx.reply(
+    "🆔 Enter the Customer's Telegram ID (e.g. `123456789`), or enter ID and message separated by space:\n\nSend /cancel to cancel.",
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:menu")]])
+  );
 });
 
 // Admin: Customer directory with pagination and one-to-one messaging.
@@ -1599,6 +1697,7 @@ bot.action(/^adm:customers:(\d+)$/, async (ctx) => {
   if (page > 0) nav.push(Markup.button.callback("⬅️ Previous", `adm:customers:${page - 1}`));
   if (page < pageCount - 1) nav.push(Markup.button.callback("Next ➡️", `adm:customers:${page + 1}`));
   if (nav.length) rows.push(nav);
+  rows.push([Markup.button.callback("🆔 Message by Telegram ID", "adm:msg_by_id")]);
   rows.push([Markup.button.callback("📢 Message All Customers", "adm:broadcast")]);
   rows.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
 
@@ -1626,12 +1725,11 @@ bot.action(/^adm:customer:(\d+)$/, async (ctx) => {
 bot.action(/^adm:customer_msg:(\d+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
-  const userId = ctx.match[1];
+  const userId = String(ctx.match[1]);
   const user = getUser(userId);
-  if (!user) return ctx.reply("❌ Customer not found.");
-  ctx.session.adminAction = { type: "customer_message", userId: String(user.id) };
-  const name = [user.first_name, user.last_name].filter(Boolean).join(" ") || String(user.id);
-  return ctx.reply(`✉️ Write the message for ${name} (ID: ${user.id}).\n\nSend /cancel to cancel.`);
+  ctx.session.adminAction = { type: "customer_message", userId };
+  const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || userId) : userId;
+  return ctx.reply(`✉️ Write the message for ${name} (ID: ${userId}).\n\nSend /cancel to cancel.`);
 });
 
 // Admin: Pending Deposits
@@ -1673,6 +1771,9 @@ Status: ${deposit.status}`;
     [
       Markup.button.callback("✅ Approve", `adm_dep_app:${deposit.id}`),
       Markup.button.callback("❌ Reject", `adm_dep_rej:${deposit.id}`)
+    ],
+    [
+      Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`)
     ],
     [Markup.button.callback("🔙 Pending List", "adm:deposits")]
   ]);
@@ -2022,6 +2123,8 @@ bot.action("adm:settings", async (ctx) => {
 • Support Handle: ${s.support_username || "Not Set"}
 • Min Binance Deposit: $${minBinance.toFixed(2)} USDT
 • Min Crypto Deposit: $${minCrypto.toFixed(2)} USDT
+• 1st Deposit Auto-Msg (15s): ${s.deposit_paid_auto_msg ? "✅ Set" : "❌ Empty"}
+• 2nd Deposit Auto-Msg (Screenshot): ${s.deposit_second_auto_msg ? "✅ Set" : "❌ Empty"}
 • Group Sales Broadcast: ${s.fake_sales_broadcast_enabled !== false ? "✅ ENABLED (~2 mins)" : "❌ DISABLED"}
 • Group Deposits Broadcast: ${s.fake_deposits_broadcast_enabled !== false ? "✅ ENABLED (~20 mins)" : "❌ DISABLED"}`;
 
@@ -2039,6 +2142,8 @@ bot.action("adm:settings", async (ctx) => {
     [Markup.button.callback("✏️ Edit BEP20 USDT", "adm_set_bep20"), Markup.button.callback("✏️ Edit Polygon USDT", "adm_set_polygon")],
     [Markup.button.callback("✏️ Edit Binance Pay ID", "adm_set_binpay"), Markup.button.callback("✏️ Edit Support", "adm_set_support")],
     [Markup.button.callback("✏️ Edit Min Binance Dep", "adm_set_min_binance"), Markup.button.callback("✏️ Edit Min Crypto Dep", "adm_set_min_crypto")],
+    [Markup.button.callback("⏱️ Set 1st Deposit Auto-Msg", "adm_set_dep_auto_msg")],
+    [Markup.button.callback("📸 Set 2nd Deposit Auto-Msg (Screenshot)", "adm_set_dep_second_msg")],
     [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
   ]);
 
@@ -2164,6 +2269,28 @@ bot.action("adm_set_min_crypto", async (ctx) => {
   await ctx.reply(
     `💰 Current Minimum Crypto (BEP20 / Polygon) Deposit: $${current} USDT\n\nEnter new Minimum Deposit amount in USDT (e.g. 1.00 or 2.00):`,
     Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:settings")]])
+  );
+});
+
+bot.action("adm_set_dep_auto_msg", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "set_dep_auto_msg" };
+  const current = getSetting("deposit_paid_auto_msg") || "Not set";
+  await ctx.reply(
+    `⏱️ Current 1st Deposit Auto-Message (15s after 1st I've Paid):\n\n${current}\n\n✍️ Send the new 1st auto-message below (or send /cancel to cancel):`,
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:menu")]])
+  );
+});
+
+bot.action("adm_set_dep_second_msg", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "set_dep_second_msg" };
+  const current = getSetting("deposit_second_auto_msg") || "Not set";
+  await ctx.reply(
+    `📸 Current 2nd Deposit Auto-Message (when customer clicks I've Paid a 2nd time & sends a screenshot):\n\n${current}\n\n✍️ Send the new 2nd auto-message below (or send /cancel to cancel):`,
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:menu")]])
   );
 });
 
@@ -2406,34 +2533,90 @@ async function handleAdminTextInput(ctx, text) {
         }
       );
     }
-    case "customer_message": {
-      const user = getUser(action.userId);
-      if (!user) return ctx.reply("❌ Customer not found; message was not sent.");
+    case "set_dep_auto_msg": {
+      setSetting("deposit_paid_auto_msg", text.trim());
+      return ctx.reply(
+        `✅ 1st Deposit Auto-Message (15s) updated successfully!\n\nNew Message:\n${text.trim()}`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback("⚙️ Settings", "adm:settings")],
+          [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+        ])
+      );
+    }
+    case "set_dep_second_msg": {
+      setSetting("deposit_second_auto_msg", text.trim());
+      return ctx.reply(
+        `✅ 2nd Deposit Auto-Message (Screenshot) updated successfully!\n\nNew Message:\n${text.trim()}`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback("⚙️ Settings", "adm:settings")],
+          [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+        ])
+      );
+    }
+    case "msg_by_id_prompt": {
+      const parts = text.trim().split(/\s+/);
+      const targetId = parts[0].trim();
+      if (!/^\d+$/.test(targetId)) {
+        return ctx.reply("❌ Invalid Telegram ID. Please enter a numeric Telegram ID (e.g. 123456789).");
+      }
+      const inlineMsg = parts.slice(1).join(" ").trim();
+      if (!inlineMsg) {
+        const user = getUser(targetId);
+        const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || targetId) : targetId;
+        ctx.session.adminAction = { type: "customer_message", userId: targetId };
+        return ctx.reply(`✉️ Write the message for ${name} (ID: ${targetId}).\n\nSend /cancel to cancel.`);
+      }
       try {
-        await bot.telegram.sendMessage(user.id, text, Markup.inlineKeyboard([
-          [Markup.button.callback("↩️ Reply", "customer:reply")]
+        await bot.telegram.sendMessage(targetId, inlineMsg, Markup.inlineKeyboard([
+          [
+            Markup.button.callback("↩️ Reply", "customer:reply"),
+            Markup.button.callback("🛍️ Buy", "menu:buy")
+          ]
         ]));
-        return ctx.reply(`✅ Message sent to ${user.first_name || user.id}.`, Markup.inlineKeyboard([
+        return ctx.reply(`✅ Message sent to Telegram ID ${targetId}.`, Markup.inlineKeyboard([
+          [Markup.button.callback("🆔 Message Another ID", "adm:msg_by_id")],
+          [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+        ]));
+      } catch (e) {
+        return ctx.reply(`❌ Could not message Telegram ID ${targetId}. They may have blocked the bot or never started it.\nReason: ${e.description || e.message || "Telegram API error"}`);
+      }
+    }
+    case "customer_message": {
+      const targetId = String(action.userId);
+      const user = getUser(targetId);
+      const displayName = user ? (user.first_name || targetId) : targetId;
+      try {
+        await bot.telegram.sendMessage(targetId, text, Markup.inlineKeyboard([
+          [
+            Markup.button.callback("↩️ Reply", "customer:reply"),
+            Markup.button.callback("🛍️ Buy", "menu:buy")
+          ]
+        ]));
+        return ctx.reply(`✅ Message sent to ${displayName}.`, Markup.inlineKeyboard([
           [Markup.button.callback("👥 Back to Customers", "adm:customers:0")],
           [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
         ]));
       } catch (e) {
-        return ctx.reply(`❌ Could not message customer ${user.id}. They may have blocked the bot or never started it.\nReason: ${e.description || e.message || "Telegram API error"}`);
+        return ctx.reply(`❌ Could not message customer ${targetId}. They may have blocked the bot or never started it.\nReason: ${e.description || e.message || "Telegram API error"}`);
       }
     }
     case "customer_reply": {
-      const user = getUser(action.userId);
-      if (!user) return ctx.reply("❌ Customer not found; reply was not sent.");
+      const targetId = String(action.userId);
+      const user = getUser(targetId);
+      const displayName = user ? (user.first_name || targetId) : targetId;
       try {
-        await bot.telegram.sendMessage(user.id, text, Markup.inlineKeyboard([
-          [Markup.button.callback("↩️ Reply", "customer:reply")]
+        await bot.telegram.sendMessage(targetId, text, Markup.inlineKeyboard([
+          [
+            Markup.button.callback("↩️ Reply", "customer:reply"),
+            Markup.button.callback("🛍️ Buy", "menu:buy")
+          ]
         ]));
-        return ctx.reply(`✅ Reply sent to ${user.first_name || user.id}.`, Markup.inlineKeyboard([
+        return ctx.reply(`✅ Reply sent to ${displayName}.`, Markup.inlineKeyboard([
           [Markup.button.callback("👥 Back to Customers", "adm:customers:0")],
           [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
         ]));
       } catch (e) {
-        return ctx.reply(`❌ Could not reply to customer ${user.id}. They may have blocked the bot.\nReason: ${e.description || e.message || "Telegram API error"}`);
+        return ctx.reply(`❌ Could not reply to customer ${targetId}. They may have blocked the bot.\nReason: ${e.description || e.message || "Telegram API error"}`);
       }
     }
     case "broadcast": {
@@ -2443,7 +2626,10 @@ async function handleAdminTextInput(ctx, text) {
       for (const u of users) {
         try {
           await bot.telegram.sendMessage(u.id, text, Markup.inlineKeyboard([
-            [Markup.button.callback("↩️ Reply", "customer:reply")]
+            [
+              Markup.button.callback("↩️ Reply", "customer:reply"),
+              Markup.button.callback("🛍️ Buy", "menu:buy")
+            ]
           ]));
           sent++;
         } catch (e) {

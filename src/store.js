@@ -22,11 +22,8 @@ const defaultSettings = {
   force_join_enabled: false,
   bep20_usdt_address: "0xC3fC8C91A5B26C71DcD0aC1F34944FB298bCeBbF",
   polygon_usdt_address: "0x58F0C60b37E5c84C4C7fE4a553F1fCe6405F412b",
-  binance_pay_id: "123456789",
   support_username: "@aibuyshop_support",
   referral_bonus_percent: 5,
-  min_binance_deposit: 0.60,
-  max_binance_deposit: 100.00,
   min_crypto_deposit: 1.00,
   fake_sales_broadcast_enabled: true,
   fake_deposits_broadcast_enabled: true,
@@ -231,9 +228,6 @@ function normalizeDb(raw) {
   } else {
     for (const [k, v] of Object.entries(defaultSettings)) {
       if (raw.settings[k] === undefined) raw.settings[k] = v;
-    }
-    if (typeof raw.settings.min_binance_deposit !== "number" || isNaN(raw.settings.min_binance_deposit) || raw.settings.min_binance_deposit <= 0) {
-      raw.settings.min_binance_deposit = 0.60;
     }
     if (typeof raw.settings.min_crypto_deposit !== "number" || isNaN(raw.settings.min_crypto_deposit) || raw.settings.min_crypto_deposit <= 0) {
       raw.settings.min_crypto_deposit = 1.00;
@@ -555,6 +549,24 @@ function getAllUsers() {
   return Object.values(load().users);
 }
 
+function recordDepositPaidClick(userId) {
+  const db = load();
+  const idStr = String(userId);
+  if (!db.users[idStr]) {
+    db.users[idStr] = {
+      id: Number(userId) || userId,
+      wallet_balance: 0.0,
+      total_spent: 0.0,
+      orders_count: 0,
+      deposit_paid_clicks: 1,
+      created_at: new Date().toISOString()
+    };
+  } else {
+    db.users[idStr].deposit_paid_clicks = (db.users[idStr].deposit_paid_clicks || 0) + 1;
+  }
+  save(db);
+}
+
 function markDepositAutoMsgSent(userId) {
   const db = load();
   const idStr = String(userId);
@@ -571,9 +583,7 @@ function markDepositAutoMsgSent(userId) {
     save(db);
     return true;
   }
-  db.users[idStr].deposit_paid_clicks = (db.users[idStr].deposit_paid_clicks || 0) + 1;
   if (db.users[idStr].deposit_auto_msg_sent) {
-    save(db);
     return false;
   }
   db.users[idStr].deposit_auto_msg_sent = true;
@@ -607,7 +617,7 @@ function createDeposit(depositData) {
     user_id: depositData.user_id,
     user_name: depositData.user_name || "",
     amount: Number(depositData.amount) || 0,
-    method: depositData.method, // 'BINANCE_PAY' or 'USDT_BEP20' or 'USDT_POLYGON'
+    method: depositData.method, // 'USDT_BEP20' or 'USDT_POLYGON'
     address: depositData.address || "",
     status: "pending", // pending, approved, rejected
     proof: depositData.proof || "",
@@ -893,6 +903,7 @@ module.exports = {
   regenerateApiKey,
   getUserByApiKey,
   getAllUsers,
+  recordDepositPaidClick,
   markDepositAutoMsgSent,
   markSecondDepositScreenshotMsgSent,
   createDeposit,

@@ -26,6 +26,7 @@ const {
   regenerateApiKey,
   getUserByApiKey,
   getAllUsers,
+  recordDepositPaidClick,
   markDepositAutoMsgSent,
   markSecondDepositScreenshotMsgSent,
   createDeposit,
@@ -223,7 +224,7 @@ function welcomeText(user) {
 
 ⚡️ Instant Automated Delivery
 ✅ Fresh & Guaranteed Accounts / Coupons
-👛 Pay with Wallet (Binance Pay / USDT BEP20)
+👛 Pay with Wallet (USDT BEP20 / Polygon)
 💬 24/7 Dedicated Support
 
 Tap 🛍️ Buy below to explore available products:`;
@@ -720,26 +721,23 @@ bot.action("order:execute_pay", async (ctx) => {
 });
 
 // =====================================================
-// DEPOSIT FLOW (BINANCE PAY & USDT BEP20 / POLYGON)
+// DEPOSIT FLOW (USDT BEP20 / POLYGON)
 // =====================================================
 bot.action(/^deposit:start(?::([\d.]+))?$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const suggestedAmount = ctx.match[1] ? Number(ctx.match[1]) : 1.0;
   const settings = getAllSettings();
-  const minBinance = Number(settings.min_binance_deposit || 0.60);
   const minCrypto = Number(settings.min_crypto_deposit || 1.00);
 
   const text = `💳 <b>SELECT DEPOSIT METHOD</b>
 ━━━━━━━━━━━━━━━━━━━
 Please choose your preferred deposit gateway:
-• <b>Binance Pay:</b> Instant C2C (Min: <b>$${minBinance.toFixed(2)} USDT</b>)
 • <b>USDT (BEP20):</b> BNB Smart Chain (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)
 • <b>USDT (Polygon):</b> Polygon / POL (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)`;
 
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback("🟡 USDT (BEP20 / BSC)", `deposit:bep20:${suggestedAmount}`)],
     [Markup.button.callback("🟣 USDT (Polygon / POL)", `deposit:polygon:${suggestedAmount}`)],
-    [Markup.button.callback(`⚡ Binance Pay (Min $${minBinance.toFixed(2)})`, `deposit:binance:${suggestedAmount}`)],
     [Markup.button.callback("🔙 Back to Wallet", "menu:wallet")]
   ]);
 
@@ -750,90 +748,6 @@ Please choose your preferred deposit gateway:
   }
   await ctx.reply(text, { parse_mode: "HTML", ...buttons });
 });
-
-// Binance Pay prompt
-bot.action(/^deposit:binance(?::([\d.]+))?$/, async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  const suggestedAmount = ctx.match[1] ? Number(ctx.match[1]) : 1.0;
-
-  ctx.session.depositMethod = "BINANCE_PAY";
-  ctx.session.awaitingDepositAmount = true;
-
-  const settings = getAllSettings();
-  const min = Number(settings.min_binance_deposit || 0.60);
-  const text = `🟡 <b>DEPOSIT VIA BINANCE PAY</b>
-━━━━━━━━━━━━━━━━━━━
-Type any amount in USDT you want to deposit (Minimum: <b>$${min.toFixed(2)} USDT</b>).
-Or select a quick amount below:`;
-
-  const quickAmounts = [
-    min,
-    Number((min + 0.40).toFixed(2)),
-    5.00,
-    10.00
-  ].filter((v, i, a) => a.indexOf(v) === i && v >= min).slice(0, 4);
-
-  const buttons = Markup.inlineKeyboard([
-    quickAmounts.map((amt) => Markup.button.callback(`${amt.toFixed(2)} USDT`, `dep_bin_set:${amt.toFixed(2)}`)),
-    [Markup.button.callback("🔙 Back", "deposit:start")]
-  ]);
-
-  try {
-    await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
-  } catch (e) {
-    await ctx.reply(text, { parse_mode: "HTML", ...buttons });
-  }
-});
-
-bot.action(/^dep_bin_set:([\d.]+)$/, async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  const amount = Number(ctx.match[1]);
-  await showBinancePayInstructions(ctx, amount);
-});
-
-async function showBinancePayInstructions(ctx, amount) {
-  const settings = getAllSettings();
-  const user = getOrCreateUser(ctx.from);
-
-  const deposit = createDeposit({
-    user_id: user.id,
-    user_name: user.username ? `@${user.username}` : user.first_name,
-    amount: amount,
-    method: "BINANCE_PAY",
-    address: settings.binance_pay_id
-  });
-
-  ctx.session.activeDepositId = deposit.id;
-
-  const binanceId = settings.binance_pay_id || "123456789";
-
-  const text = `🟡 <b>BINANCE PAY DEPOSIT</b>
-━━━━━━━━━━━━━━━━━━━
-💰 <b>Amount to send:</b> <b>${money(deposit.amount)}</b>
-
-💵 <b>Binance Pay ID:</b>
-<code>${binanceId}</code>
-<i>👆 (Tap ID above to auto-copy to clipboard)</i>
-━━━━━━━━━━━━━━━━━━━
-
-⚠️ <b>Quick Instructions:</b>
-1. Open your <b>Binance App</b> ➔ Go to <b>Pay</b> ➔ <b>Send</b>
-2. Tap the Binance Pay ID above to copy it automatically
-3. Send exactly <b>${money(deposit.amount)}</b>
-4. Once sent, tap <b>"✅ I've Paid"</b> below to submit your payment proof!`;
-
-  const buttons = Markup.inlineKeyboard([
-    [Markup.button.callback("✅ I've Paid", `deposit_paid:${deposit.id}`)],
-    [Markup.button.callback("❌ Cancel", "menu:wallet")]
-  ]);
-
-  if (ctx.callbackQuery) {
-    try {
-      return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
-    } catch (e) {}
-  }
-  await ctx.reply(text, { parse_mode: "HTML", ...buttons });
-}
 
 // USDT BEP20 deposit
 bot.action(/^deposit:bep20(?::([\d.]+))?$/, async (ctx) => {
@@ -964,6 +878,12 @@ bot.action(/^deposit_paid:(.+)$/, async (ctx) => {
 
   ctx.session.awaitingProofForDeposit = depositId;
 
+  // Record that user clicked I've Paid
+  const targetUserId = ctx.from?.id || deposit.user_id;
+  if (targetUserId) {
+    recordDepositPaidClick(targetUserId);
+  }
+
   await ctx.reply(
     `📩 Please send your Transaction Hash (TxID) or payment screenshot below for Deposit <b>${depositId}</b>, or tap <b>"✅ Submit Without Proof"</b> below:`,
     {
@@ -974,29 +894,6 @@ bot.action(/^deposit_paid:(.+)$/, async (ctx) => {
       ])
     }
   );
-
-  // Send 1st automatic message 15 seconds after clicking "I've Paid" (only the first time per user ID)
-  const targetUserId = ctx.from?.id || deposit.user_id;
-  if (targetUserId && markDepositAutoMsgSent(targetUserId)) {
-    setTimeout(() => {
-      const autoMsg = getSetting("deposit_paid_auto_msg");
-      if (autoMsg && String(autoMsg).trim()) {
-        bot.telegram.sendMessage(
-          targetUserId,
-          String(autoMsg).trim(),
-          Markup.inlineKeyboard([
-            [
-              Markup.button.callback("🛍️ Buy", "menu:buy"),
-              Markup.button.callback("💳 Add Funds / Deposit", "deposit:start")
-            ],
-            [
-              Markup.button.callback("↩️ Reply", "customer:reply")
-            ]
-          ])
-        ).catch(() => {});
-      }
-    }, 15 * 1000);
-  }
 });
 
 // User submits deposit without providing TxID or screenshot
@@ -1059,18 +956,6 @@ bot.on("text", async (ctx, next) => {
     return showProductDetails(ctx, productId, qty);
   }
 
-  // If waiting for Binance Pay custom deposit amount
-  if (ctx.session.awaitingDepositAmount) {
-    ctx.session.awaitingDepositAmount = null;
-    const amt = parseFloat(text);
-    const settings = getAllSettings();
-    const min = Number(settings.min_binance_deposit || 0.60);
-    if (isNaN(amt) || amt < min) {
-      return ctx.reply(`❌ Invalid amount. Minimum Binance Pay deposit is ${money(min)}.`);
-    }
-    return showBinancePayInstructions(ctx, amt);
-  }
-
   // If waiting for Order Recovery code
   if (ctx.session.awaitingRecoverCode) {
     ctx.session.awaitingRecoverCode = null;
@@ -1130,27 +1015,50 @@ bot.on("photo", async (ctx, next) => {
       deposit.updated_at = new Date().toISOString();
       await notifyAdminNewDeposit(ctx, deposit, fileId);
 
-      // If this is the 2nd time the user clicked "I've Paid" and submitted a screenshot as proof, send the 2nd auto-message
+      // Automatic message triggered ONLY when user submits a screenshot (proof)
       const targetUserId = ctx.from?.id || deposit.user_id;
-      if (targetUserId && markSecondDepositScreenshotMsgSent(targetUserId)) {
-        setTimeout(() => {
-          const secondMsg = getSetting("deposit_second_auto_msg");
-          if (secondMsg && String(secondMsg).trim()) {
-            bot.telegram.sendMessage(
-              targetUserId,
-              String(secondMsg).trim(),
-              Markup.inlineKeyboard([
-                [
-                  Markup.button.callback("🛍️ Buy", "menu:buy"),
-                  Markup.button.callback("💳 Add Funds / Deposit", "deposit:start")
-                ],
-                [
-                  Markup.button.callback("↩️ Reply", "customer:reply")
-                ]
-              ])
-            ).catch(() => {});
-          }
-        }, 15 * 1000);
+      if (targetUserId) {
+        if (markDepositAutoMsgSent(targetUserId)) {
+          // 1st screenshot submitted -> send 1st auto-message after 1 min 30 seconds (90s)
+          setTimeout(() => {
+            const autoMsg = getSetting("deposit_paid_auto_msg");
+            if (autoMsg && String(autoMsg).trim()) {
+              bot.telegram.sendMessage(
+                targetUserId,
+                String(autoMsg).trim(),
+                Markup.inlineKeyboard([
+                  [
+                    Markup.button.callback("🛍️ Buy", "menu:buy"),
+                    Markup.button.callback("💳 Add Funds / Deposit", "deposit:start")
+                  ],
+                  [
+                    Markup.button.callback("↩️ Reply", "customer:reply")
+                  ]
+                ])
+              ).catch(() => {});
+            }
+          }, 90 * 1000);
+        } else if (markSecondDepositScreenshotMsgSent(targetUserId)) {
+          // 2nd screenshot submitted -> send 2nd auto-message after 1 min 30 seconds (90s)
+          setTimeout(() => {
+            const secondMsg = getSetting("deposit_second_auto_msg");
+            if (secondMsg && String(secondMsg).trim()) {
+              bot.telegram.sendMessage(
+                targetUserId,
+                String(secondMsg).trim(),
+                Markup.inlineKeyboard([
+                  [
+                    Markup.button.callback("🛍️ Buy", "menu:buy"),
+                    Markup.button.callback("💳 Add Funds / Deposit", "deposit:start")
+                  ],
+                  [
+                    Markup.button.callback("↩️ Reply", "customer:reply")
+                  ]
+                ])
+              ).catch(() => {});
+            }
+          }, 90 * 1000);
+        }
       }
 
       return ctx.reply(
@@ -2107,7 +2015,6 @@ bot.action("adm:settings", async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
   const s = getAllSettings();
-  const minBinance = Number(s.min_binance_deposit ?? 0.60);
   const minCrypto = Number(s.min_crypto_deposit ?? 1.00);
 
   const text = `⚙️ BOT SETTINGS & CONFIGURATION:
@@ -2119,12 +2026,10 @@ bot.action("adm:settings", async (ctx) => {
 • Group Link: ${s.group_link || "Not Set"}
 • USDT BEP20 Address: ${s.bep20_usdt_address}
 • USDT Polygon Address: ${s.polygon_usdt_address || s.bep20_usdt_address}
-• Binance Pay ID: ${s.binance_pay_id}
 • Support Handle: ${s.support_username || "Not Set"}
-• Min Binance Deposit: $${minBinance.toFixed(2)} USDT
 • Min Crypto Deposit: $${minCrypto.toFixed(2)} USDT
-• 1st Deposit Auto-Msg (15s): ${s.deposit_paid_auto_msg ? "✅ Set" : "❌ Empty"}
-• 2nd Deposit Auto-Msg (Screenshot): ${s.deposit_second_auto_msg ? "✅ Set" : "❌ Empty"}
+• 1st Deposit Auto-Msg (1m 30s): ${s.deposit_paid_auto_msg ? "✅ Set" : "❌ Empty"}
+• 2nd Deposit Auto-Msg (Screenshot, 1m 30s): ${s.deposit_second_auto_msg ? "✅ Set" : "❌ Empty"}
 • Group Sales Broadcast: ${s.fake_sales_broadcast_enabled !== false ? "✅ ENABLED (~2 mins)" : "❌ DISABLED"}
 • Group Deposits Broadcast: ${s.fake_deposits_broadcast_enabled !== false ? "✅ ENABLED (~20 mins)" : "❌ DISABLED"}`;
 
@@ -2140,8 +2045,7 @@ bot.action("adm:settings", async (ctx) => {
     ],
     [Markup.button.callback("✏️ Edit Channel", "adm_set_chan"), Markup.button.callback("✏️ Edit Group", "adm_set_grp")],
     [Markup.button.callback("✏️ Edit BEP20 USDT", "adm_set_bep20"), Markup.button.callback("✏️ Edit Polygon USDT", "adm_set_polygon")],
-    [Markup.button.callback("✏️ Edit Binance Pay ID", "adm_set_binpay"), Markup.button.callback("✏️ Edit Support", "adm_set_support")],
-    [Markup.button.callback("✏️ Edit Min Binance Dep", "adm_set_min_binance"), Markup.button.callback("✏️ Edit Min Crypto Dep", "adm_set_min_crypto")],
+    [Markup.button.callback("✏️ Edit Support", "adm_set_support"), Markup.button.callback("✏️ Edit Min Crypto Dep", "adm_set_min_crypto")],
     [Markup.button.callback("⏱️ Set 1st Deposit Auto-Msg", "adm_set_dep_auto_msg")],
     [Markup.button.callback("📸 Set 2nd Deposit Auto-Msg (Screenshot)", "adm_set_dep_second_msg")],
     [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
@@ -2233,30 +2137,12 @@ bot.action("adm_set_polygon", async (ctx) => {
   await ctx.reply("Enter new Polygon USDT Address (MATIC/POL):");
 });
 
-bot.action("adm_set_binpay", async (ctx) => {
-  if (!adminOnly(ctx)) return;
-  await ctx.answerCbQuery().catch(() => {});
-  ctx.session.adminAction = { type: "set_binance_pay" };
-  await ctx.reply("Enter new Binance Pay ID:");
-});
-
 bot.action("adm_set_support", async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
   ctx.session.adminAction = { type: "set_support" };
   await ctx.reply(
     "👤 Enter new Admin Support Telegram username or link (e.g. `@my_support` or `https://t.me/my_support`):",
-    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:settings")]])
-  );
-});
-
-bot.action(["adm_set_min_binance", "adm_set_mindep"], async (ctx) => {
-  if (!adminOnly(ctx)) return;
-  await ctx.answerCbQuery().catch(() => {});
-  ctx.session.adminAction = { type: "set_min_binance" };
-  const current = Number(getSetting("min_binance_deposit") || 0.60).toFixed(2);
-  await ctx.reply(
-    `💰 Current Minimum Binance Pay Deposit: $${current} USDT\n\nEnter new Minimum Deposit amount in USDT (e.g. 0.50 or 1.00):`,
     Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:settings")]])
   );
 });
@@ -2278,7 +2164,7 @@ bot.action("adm_set_dep_auto_msg", async (ctx) => {
   ctx.session.adminAction = { type: "set_dep_auto_msg" };
   const current = getSetting("deposit_paid_auto_msg") || "Not set";
   await ctx.reply(
-    `⏱️ Current 1st Deposit Auto-Message (15s after 1st I've Paid):\n\n${current}\n\n✍️ Send the new 1st auto-message below (or send /cancel to cancel):`,
+    `⏱️ Current 1st Deposit Auto-Message (1m 30s after 1st screenshot):\n\n${current}\n\n✍️ Send the new 1st auto-message below (or send /cancel to cancel):`,
     Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:menu")]])
   );
 });
@@ -2289,7 +2175,7 @@ bot.action("adm_set_dep_second_msg", async (ctx) => {
   ctx.session.adminAction = { type: "set_dep_second_msg" };
   const current = getSetting("deposit_second_auto_msg") || "Not set";
   await ctx.reply(
-    `📸 Current 2nd Deposit Auto-Message (when customer clicks I've Paid a 2nd time & sends a screenshot):\n\n${current}\n\n✍️ Send the new 2nd auto-message below (or send /cancel to cancel):`,
+    `📸 Current 2nd Deposit Auto-Message (1m 30s after 2nd screenshot):\n\n${current}\n\n✍️ Send the new 2nd auto-message below (or send /cancel to cancel):`,
     Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:menu")]])
   );
 });
@@ -2479,10 +2365,6 @@ async function handleAdminTextInput(ctx, text) {
       setSetting("polygon_usdt_address", text.trim());
       return ctx.reply(`✅ Both USDT Addresses updated to:\n<code>${text.trim()}</code>`, { parse_mode: "HTML" });
     }
-    case "set_binance_pay": {
-      setSetting("binance_pay_id", text);
-      return ctx.reply(`✅ Binance Pay ID updated to: ${text}`);
-    }
     case "set_support": {
       let raw = text.trim();
       if (raw.includes("t.me/")) {
@@ -2496,22 +2378,6 @@ async function handleAdminTextInput(ctx, text) {
       setSetting("support_username", username);
       return ctx.reply(
         `✅ Support Username updated successfully to: <b>${username}</b>\nLink: https://t.me/${raw}`,
-        {
-          parse_mode: "HTML",
-          ...Markup.inlineKeyboard([[Markup.button.callback("⚙️ Back to Settings", "adm:settings")]])
-        }
-      );
-    }
-    case "set_min_binance":
-    case "set_min_deposit": {
-      const minAmt = parseFloat(text.replace("$", "").trim());
-      if (isNaN(minAmt) || minAmt <= 0) {
-        return ctx.reply("❌ Invalid amount. Please enter a positive number (e.g. 0.50 or 1.00).");
-      }
-      const cleanAmt = Number(minAmt.toFixed(2));
-      setSetting("min_binance_deposit", cleanAmt);
-      return ctx.reply(
-        `✅ <b>Minimum Binance Pay Deposit</b> updated to <b>$${cleanAmt.toFixed(2)} USDT</b>!`,
         {
           parse_mode: "HTML",
           ...Markup.inlineKeyboard([[Markup.button.callback("⚙️ Back to Settings", "adm:settings")]])

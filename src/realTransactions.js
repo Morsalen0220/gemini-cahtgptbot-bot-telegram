@@ -142,9 +142,8 @@ if (refreshTimer.unref) refreshTimer.unref();
 // Get a 100% verified, live, working transaction proof
 function getRealCryptoTransactionProof() {
   const rand = Math.random();
-  // 60% BSC (BEP20), 30% Polygon, 10% Binance Pay (points to BSC)
-  const isPolygon = rand >= 0.60 && rand < 0.90;
-  const isBinancePay = rand >= 0.90;
+  // 60% BSC (BEP20), 40% Polygon
+  const isPolygon = rand >= 0.60;
 
   if (isPolygon) {
     const pool = livePolygonPool.length > 0 ? livePolygonPool : REAL_POLYGON_TRANSACTIONS;
@@ -154,15 +153,6 @@ function getRealCryptoTransactionProof() {
       gatewayIcon: "🟣",
       txId: txHash,
       txUrl: `https://polygonscan.com/tx/${txHash}`
-    };
-  } else if (isBinancePay) {
-    const pool = liveBscPool.length > 0 ? liveBscPool : REAL_BSC_TRANSACTIONS;
-    const txHash = pool[Math.floor(Math.random() * pool.length)];
-    return {
-      methodLabel: "Binance Pay",
-      gatewayIcon: "⚡️",
-      txId: txHash,
-      txUrl: `https://bscscan.com/tx/${txHash}`
     };
   } else {
     // USDT BEP20

@@ -33,7 +33,7 @@ Stop paying $20/month for AI subscriptions!
 Are you an account reseller or agency?
 Buy 100+ units of Gemini Links 18M for only <b>$0.50 USDT each</b>!
 • Fully automated dispensary in our bot
-• Deposit via Binance Pay or USDT BEP20
+• Deposit via USDT BEP20 or Polygon
 • Stock is live & updated in real time!`,
 
   `⚡️ <b>STUDENT & CODER ESSENTIAL: GEMINI 1.5 PRO</b>
@@ -76,7 +76,7 @@ A Gemini 18M plan includes full Gemini 1.5 Pro features:
   `🎯 <b>LIMITED TIME PROMO: GEMINI 18M AT $0.55!</b>
 ━━━━━━━━━━━━━━━━━━━━
 Get top-tier Google AI with zero hassle:
-1. Deposit funds in bot wallet (Binance Pay / USDT)
+1. Deposit funds in bot wallet (USDT BEP20 / Polygon)
 2. Tap Buy ➔ Gemini Links 18M
 3. Paste the redeem link into your browser and activate!
 ⚡️ 2-second automated delivery!`,
@@ -212,7 +212,6 @@ Our bot is powered by Node 24 & Google Firebase:
   `💳 <b>MULTIPLE PAYMENT METHODS SUPPORTED!</b>
 ━━━━━━━━━━━━━━━━━━━━
 Fund your wallet effortlessly in seconds:
-🟡 <b>Binance Pay:</b> 0% fees, instant credit
 🌐 <b>USDT BEP20 (BSC):</b> Fast on-chain confirmation
 🟣 <b>Polygon USDT:</b> Ultra-low gas fees
 ⚡️ 100% automated credit to your bot balance!`,
@@ -263,12 +262,11 @@ Once your 18M plan is active:
 3. Paste your API Key into the Anthropic / OpenAI field
 4. Done! Unlimited fast AI autocomplete and chat!`,
 
-  `👛 <b>HOW TO DEPOSIT VIA BINANCE PAY IN 30 SECONDS:</b>
+  `👛 <b>HOW TO DEPOSIT VIA USDT IN 30 SECONDS:</b>
 ━━━━━━━━━━━━━━━━━━━━
 1. Open @aibuyshop_bot ➔ Tap 👛 Wallet
-2. Click Deposit ➔ Binance Pay
-3. Enter the amount in USDT
-4. Send to the displayed Binance Pay ID & tap "I've Paid"
+2. Click Deposit ➔ USDT (BEP20 / Polygon)
+3. Send to the displayed wallet address & tap "I've Paid"
 ⚡️ Balance credited instantly!`,
 
   `❓ <b>NEED ASSISTANCE OR HAVE QUESTIONS?</b>
@@ -429,7 +427,7 @@ Join hundreds of happy users today: @aibuyshop_bot`,
 
   `💎 <b>SECURE WALLET WITH ZERO TRANSACTION DELAYS</b>
 ━━━━━━━━━━━━━━━━━━━━
-Deposit anytime via Binance Pay with 0% fee.
+Deposit anytime via USDT BEP20 or Polygon.
 Your balance reflects within seconds, ready to shop anytime.
 🛒 Start now: @aibuyshop_bot`,
 
@@ -501,9 +499,9 @@ Invite 30 friends using your bot link ➔ Claim 1 FREE Gemini 18M!
 Plus 5% lifetime commissions on all deposits.
 👉 @aibuyshop_bot`,
 
-  `⚡️ <b>BINANCE PAY INSTANT DEPOSITS ACTIVE!</b>
+  `⚡️ <b>USDT INSTANT DEPOSITS ACTIVE!</b>
 ━━━━━━━━━━━━━━━━━━━━
-Zero transfer fees. Instant wallet balance credit.
+Fast confirmation. Instant wallet balance credit.
 Shop premium AI subscriptions in 1 click!
 🛒 @aibuyshop_bot`,
 

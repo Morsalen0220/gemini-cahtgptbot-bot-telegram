@@ -128,7 +128,8 @@ const OUTGOING_USER_METHODS = new Set([
   "editMessageCaption",
   "editMessageMedia",
   "editMessageReplyMarkup",
-  "sendChatAction"
+  "sendChatAction",
+  "pinChatMessage"
 ]);
 
 function isPrivateCustomerChatId(chatId) {
@@ -2281,6 +2282,10 @@ Select an action below:`;
     [Markup.button.callback("⚙️ Force Join & Payment Settings", "adm:settings")],
     [Markup.button.callback("📢 Channel Auto-Poster (2x/Day)", "adm:channel_poster")],
     [Markup.button.callback("📢 Broadcast Message", "adm:broadcast")],
+    [
+      Markup.button.callback("📌 Pin New Message (All Users)", "adm:pin_broadcast"),
+      Markup.button.callback("🗑️ Remove All Old Pins", "adm:unpin_all_users")
+    ],
     [Markup.button.callback("🏠 Customer Menu", "menu:main")]
   ]);
 
@@ -2731,6 +2736,10 @@ bot.action(/^adm:customers:(\d+)$/, async (ctx) => {
     Markup.button.callback("🆔 Message by ID", "adm:msg_by_id")
   ]);
   rows.push([Markup.button.callback("📢 Message All Customers", "adm:broadcast")]);
+  rows.push([
+    Markup.button.callback("📌 Pin Message (All)", "adm:pin_broadcast"),
+    Markup.button.callback("🗑️ Remove Old Pins", "adm:unpin_all_users")
+  ]);
   rows.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
 
   const markup = Markup.inlineKeyboard(rows);
@@ -3369,8 +3378,138 @@ bot.action("adm:broadcast", async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
   ctx.session.adminAction = { type: "broadcast" };
-  await ctx.reply("Send the message you want to broadcast to all registered bot users:");
+  await ctx.reply(
+    "📢 Send the message you want to broadcast to all registered active bot users:\n\nSend /cancel to cancel.",
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:menu")]])
+  );
 });
+
+// Admin: Broadcast & Pin New Message to All Users
+bot.action("adm:pin_broadcast", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "pin_broadcast" };
+  await ctx.reply(
+    "📌 <b>PIN NEW MESSAGE TO ALL USERS</b>\n━━━━━━━━━━━━━━━━━━━━\nSend the message you want to broadcast and <b>PIN</b> at the top of every customer's bot chat.\n\n<i>Note: Any old pinned messages in their chat will be automatically unpinned first so only this new message stays pinned. Blocked users are automatically skipped.</i>\n\nSend <code>/cancel</code> to cancel.",
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:menu")]])
+    }
+  );
+});
+
+// Admin: Remove All Old Pins from All Users
+async function executeUnpinAllUsers(ctx) {
+  const users = getAllUsers();
+  await ctx.reply(`⏳ Removing all old pinned messages from ${users.length} users' chats...`);
+  let unpinnedCount = 0;
+  let failedCount = 0;
+
+  for (const u of users) {
+    try {
+      await rawCallApi("unpinAllChatMessages", { chat_id: u.id });
+      unpinnedCount++;
+    } catch (e) {
+      failedCount++;
+    }
+    await new Promise(resolve => setTimeout(resolve, 35));
+  }
+
+  setSetting("pinned_broadcast_text", "");
+  return ctx.reply(
+    `🗑️ <b>ALL OLD PINS REMOVED!</b>\n━━━━━━━━━━━━━━━━━━━━\n✅ Cleared Pins For: <b>${unpinnedCount}</b> users\n⚠️ Unreachable / Skipped: <b>${failedCount}</b>\n👥 Total Users Checked: <b>${users.length}</b>`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("📌 Pin a New Message", "adm:pin_broadcast")],
+        [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+      ])
+    }
+  );
+}
+
+bot.action("adm:unpin_all_users", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery("Removing all old pins...").catch(() => {});
+  return executeUnpinAllUsers(ctx);
+});
+
+bot.command("unpinall", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  return executeUnpinAllUsers(ctx);
+});
+
+bot.command("pinall", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const msgText = (ctx.message?.text || "").replace(/^\/pinall(@\S+)?\s*/i, "").trim();
+  if (!msgText) {
+    ctx.session.adminAction = { type: "pin_broadcast" };
+    return ctx.reply(
+      "📌 Send the message you want to broadcast and PIN to all active users (or use `/pinall <message>`):\n\nSend /cancel to cancel.",
+      Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:menu")]])
+    );
+  }
+  return executePinBroadcastToAllUsers(ctx, msgText);
+});
+
+async function executePinBroadcastToAllUsers(ctx, text) {
+  const allUsers = getAllUsers();
+  const activeUsers = allUsers.filter(u => !u.is_blocked && !isUserBlocked(u.id));
+  const blockedSkipped = allUsers.length - activeUsers.length;
+
+  await ctx.reply(`⏳ Sending & pinning message to ${activeUsers.length} active users (removing old pins first)...`);
+
+  let sent = 0;
+  let pinned = 0;
+  let failed = 0;
+
+  for (const u of activeUsers) {
+    if (isUserBlocked(u.id)) continue;
+    try {
+      // 1. Remove any old pinned messages in this user's chat first
+      await rawCallApi("unpinAllChatMessages", { chat_id: u.id }).catch(() => {});
+
+      // 2. Send the new message
+      const sentMsg = await bot.telegram.sendMessage(
+        u.id,
+        text,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback("🛍️ Buy", "menu:buy"),
+            Markup.button.callback("🎫 Open Ticket", "ticket:new")
+          ]
+        ])
+      );
+      sent++;
+
+      // 3. Pin the newly sent message
+      if (sentMsg && sentMsg.message_id) {
+        await rawCallApi("pinChatMessage", {
+          chat_id: u.id,
+          message_id: sentMsg.message_id,
+          disable_notification: false
+        });
+        pinned++;
+      }
+    } catch (e) {
+      failed++;
+    }
+    await new Promise(resolve => setTimeout(resolve, 45));
+  }
+
+  setSetting("pinned_broadcast_text", text);
+
+  return ctx.reply(
+    `📌 <b>BROADCAST & PIN COMPLETED!</b>\n━━━━━━━━━━━━━━━━━━━━\n✅ Message Sent: <b>${sent}</b>\n📌 Successfully Pinned: <b>${pinned}</b>\n❌ Failed: <b>${failed}</b>\n🚫 Blocked (Skipped): <b>${blockedSkipped}</b>\n👥 Total Active Customers: <b>${activeUsers.length}</b>`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("🗑️ Remove All Pins", "adm:unpin_all_users")],
+        [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+      ])
+    }
+  );
+}
 
 // Admin: Channel Auto-Poster Dashboard
 bot.action("adm:channel_poster", async (ctx) => {
@@ -3878,6 +4017,9 @@ async function handleAdminTextInput(ctx, text) {
         await new Promise(resolve => setTimeout(resolve, 40));
       }
       return ctx.reply(`📢 Broadcast completed.\n✅ Sent: ${sent}\n❌ Failed: ${failed}\n🚫 Blocked (Skipped): ${blockedSkipped}\n👥 Total active customers: ${activeUsers.length}`);
+    }
+    case "pin_broadcast": {
+      return executePinBroadcastToAllUsers(ctx, text);
     }
     default:
       return ctx.reply("Unknown action.");

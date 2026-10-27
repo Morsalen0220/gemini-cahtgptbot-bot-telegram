@@ -787,22 +787,21 @@ async function showBep20DepositInstructions(ctx, amount) {
 
   ctx.session.activeDepositId = deposit.id;
 
-  const text = `🟡 <b>USDT DEPOSIT (BEP20 / BSC)</b>
-━━━━━━━━━━━━━━━━━━━
-💰 <b>Network:</b> <b>BNB Smart Chain (BEP20)</b>
-💵 <b>Minimum Deposit:</b> <b>${minCrypto.toFixed(2)} USDT</b>
-<i>(Wallet is credited automatically upon on-chain arrival)</i>
+  const defaultDesc = `⚠️ <b>Important:</b>\n• Send only <b>USDT</b> on <b>BNB Smart Chain (BEP20)</b>.\n• After payment, tap <b>"✅ I've Paid"</b> below to send proof.`;
+  const desc = settings.bep20_deposit_desc && String(settings.bep20_deposit_desc).trim()
+    ? String(settings.bep20_deposit_desc).trim()
+    : defaultDesc;
 
-━━━━━━━━━━━━━━━━━━━
-🟡 <b>BEP20 USDT Address:</b>
+  const text = `🟡 <b>USDT (BEP20 / BSC) DEPOSIT</b>
+━━━━━━━━━━━━━━━━━━━━
+🌐 <b>Network:</b> BNB Smart Chain (BEP20)
+💵 <b>Minimum Deposit:</b> $${minCrypto.toFixed(2)} USDT
+
+📋 <b>Deposit Address (Tap to copy):</b>
 <code>${bep20Address}</code>
-<i>👆 (Tap address above to copy automatically)</i>
-━━━━━━━━━━━━━━━━━━━
 
-⚠️ <b>Guidelines:</b>
-• Send only <b>USDT (BEP20)</b> to the address above.
-• Tap on the address to auto-copy to your clipboard.
-• After sending, tap <b>"✅ I've Paid"</b> below to submit proof!`;
+━━━━━━━━━━━━━━━━━━━━
+${desc}`;
 
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback("✅ I've Paid", `deposit_paid:${deposit.id}`)],
@@ -813,9 +812,17 @@ async function showBep20DepositInstructions(ctx, amount) {
   if (ctx.callbackQuery) {
     try {
       return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
-    } catch (e) {}
+    } catch (e) {
+      try {
+        return await ctx.editMessageText(text, { ...buttons });
+      } catch (e2) {}
+    }
   }
-  await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+  try {
+    await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+  } catch (e) {
+    await ctx.reply(text, { ...buttons });
+  }
 }
 
 async function showPolygonDepositInstructions(ctx, amount) {
@@ -835,22 +842,18 @@ async function showPolygonDepositInstructions(ctx, amount) {
 
   ctx.session.activeDepositId = deposit.id;
 
-  const text = `🟣 <b>USDT DEPOSIT (POLYGON / MATIC)</b>
-━━━━━━━━━━━━━━━━━━━
-💰 <b>Network:</b> <b>Polygon (POL / MATIC)</b>
-💵 <b>Minimum Deposit:</b> <b>${minCrypto.toFixed(2)} USDT</b>
-<i>(Wallet is credited automatically upon on-chain arrival)</i>
+  const text = `🟣 <b>USDT (POLYGON) DEPOSIT</b>
+━━━━━━━━━━━━━━━━━━━━
+🌐 <b>Network:</b> Polygon (POL / MATIC)
+💵 <b>Minimum Deposit:</b> $${minCrypto.toFixed(2)} USDT
 
-━━━━━━━━━━━━━━━━━━━
-🟣 <b>Polygon USDT Address:</b>
+📋 <b>Deposit Address (Tap to copy):</b>
 <code>${polygonAddress}</code>
-<i>👆 (Tap address above to copy automatically)</i>
-━━━━━━━━━━━━━━━━━━━
 
-⚠️ <b>Guidelines:</b>
-• Send only <b>USDT (Polygon)</b> to the address above.
-• Tap on the address to auto-copy to your clipboard.
-• After sending, tap <b>"✅ I've Paid"</b> below to submit proof!`;
+━━━━━━━━━━━━━━━━━━━━
+⚠️ <b>Important:</b>
+• Send only <b>USDT</b> on <b>Polygon</b> network.
+• After payment, tap <b>"✅ I've Paid"</b> below to send proof.`;
 
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback("✅ I've Paid", `deposit_paid:${deposit.id}`)],
@@ -861,9 +864,17 @@ async function showPolygonDepositInstructions(ctx, amount) {
   if (ctx.callbackQuery) {
     try {
       return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
-    } catch (e) {}
+    } catch (e) {
+      try {
+        return await ctx.editMessageText(text, { ...buttons });
+      } catch (e2) {}
+    }
   }
-  await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+  try {
+    await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+  } catch (e) {
+    await ctx.reply(text, { ...buttons });
+  }
 }
 
 // User taps "I've Paid"
@@ -2026,6 +2037,7 @@ bot.action("adm:settings", async (ctx) => {
 • Group Link: ${s.group_link || "Not Set"}
 • USDT BEP20 Address: ${s.bep20_usdt_address}
 • USDT Polygon Address: ${s.polygon_usdt_address || s.bep20_usdt_address}
+• BEP20 Deposit Description: ${s.bep20_deposit_desc ? "✅ Custom" : "Default"}
 • Support Handle: ${s.support_username || "Not Set"}
 • Min Crypto Deposit: $${minCrypto.toFixed(2)} USDT
 • 1st Deposit Auto-Msg (1m 30s): ${s.deposit_paid_auto_msg ? "✅ Set" : "❌ Empty"}
@@ -2045,6 +2057,7 @@ bot.action("adm:settings", async (ctx) => {
     ],
     [Markup.button.callback("✏️ Edit Channel", "adm_set_chan"), Markup.button.callback("✏️ Edit Group", "adm_set_grp")],
     [Markup.button.callback("✏️ Edit BEP20 USDT", "adm_set_bep20"), Markup.button.callback("✏️ Edit Polygon USDT", "adm_set_polygon")],
+    [Markup.button.callback("📝 Edit BEP20 Description", "adm_set_bep20_desc")],
     [Markup.button.callback("✏️ Edit Support", "adm_set_support"), Markup.button.callback("✏️ Edit Min Crypto Dep", "adm_set_min_crypto")],
     [Markup.button.callback("⏱️ Set 1st Deposit Auto-Msg", "adm_set_dep_auto_msg")],
     [Markup.button.callback("📸 Set 2nd Deposit Auto-Msg (Screenshot)", "adm_set_dep_second_msg")],
@@ -2135,6 +2148,20 @@ bot.action("adm_set_polygon", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   ctx.session.adminAction = { type: "set_polygon_addr" };
   await ctx.reply("Enter new Polygon USDT Address (MATIC/POL):");
+});
+
+bot.action("adm_set_bep20_desc", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "set_bep20_desc" };
+  const current = getSetting("bep20_deposit_desc") || "Default instructions";
+  await ctx.reply(
+    `📝 <b>Current BEP20 Deposit Description:</b>\n\n${current}\n\n✍️ Send the new description text below (HTML supported e.g. <b>bold</b>).\n\n💡 Send <code>/default</code> to reset to default instructions, or <code>/cancel</code> to cancel:`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:settings")]])
+    }
+  );
 });
 
 bot.action("adm_set_support", async (ctx) => {
@@ -2399,10 +2426,43 @@ async function handleAdminTextInput(ctx, text) {
         }
       );
     }
+    case "set_bep20_desc": {
+      if (text.trim() === "/default") {
+        setSetting("bep20_deposit_desc", "");
+        return ctx.reply(
+          "✅ BEP20 Deposit Description reset to default!",
+          Markup.inlineKeyboard([
+            [Markup.button.callback("⚙️ Settings", "adm:settings")],
+            [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+          ])
+        );
+      }
+      setSetting("bep20_deposit_desc", text.trim());
+      try {
+        return await ctx.reply(
+          `✅ <b>BEP20 Deposit Description updated successfully!</b>\n\n<b>Preview:</b>\n${text.trim()}`,
+          {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback("⚙️ Settings", "adm:settings")],
+              [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+            ])
+          }
+        );
+      } catch (err) {
+        return await ctx.reply(
+          `✅ BEP20 Deposit Description updated successfully!\n\nPreview:\n${text.trim()}`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback("⚙️ Settings", "adm:settings")],
+            [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+          ])
+        );
+      }
+    }
     case "set_dep_auto_msg": {
       setSetting("deposit_paid_auto_msg", text.trim());
       return ctx.reply(
-        `✅ 1st Deposit Auto-Message (15s) updated successfully!\n\nNew Message:\n${text.trim()}`,
+        `✅ 1st Deposit Auto-Message (1m 30s) updated successfully!\n\nNew Message:\n${text.trim()}`,
         Markup.inlineKeyboard([
           [Markup.button.callback("⚙️ Settings", "adm:settings")],
           [Markup.button.callback("🔙 Admin Menu", "adm:menu")]

@@ -22,6 +22,7 @@ const defaultSettings = {
   force_join_enabled: false,
   bep20_usdt_address: "0xC3fC8C91A5B26C71DcD0aC1F34944FB298bCeBbF",
   polygon_usdt_address: "0x58F0C60b37E5c84C4C7fE4a553F1fCe6405F412b",
+  bep20_deposit_desc: "",
   support_username: "@aibuyshop_support",
   referral_bonus_percent: 5,
   min_crypto_deposit: 1.00,

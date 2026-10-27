@@ -219,7 +219,8 @@ const defaults = {
   channel_posts: defaultChannelPosts,
   users: {},
   deposits: [],
-  orders: []
+  orders: [],
+  tickets: []
 };
 
 let memoryDb = null;
@@ -287,6 +288,10 @@ function normalizeDb(raw) {
   if (!Array.isArray(raw.orders)) {
     if (raw.orders && typeof raw.orders === "object") raw.orders = Object.values(raw.orders);
     else raw.orders = [];
+  }
+  if (!Array.isArray(raw.tickets)) {
+    if (raw.tickets && typeof raw.tickets === "object") raw.tickets = Object.values(raw.tickets);
+    else raw.tickets = [];
   }
 
   return raw;
@@ -888,6 +893,105 @@ function addChannelPost(newPost) {
   return db.channel_posts;
 }
 
+// ----------------------------------------------------
+// SUPPORT TICKETS
+// ----------------------------------------------------
+function createTicket(ticketData) {
+  const db = load();
+  if (!Array.isArray(db.tickets)) db.tickets = [];
+
+  const nextNum = 1001 + db.tickets.length;
+  const ticketId = `TKT-${nextNum}`;
+  const now = new Date().toISOString();
+
+  const ticket = {
+    id: ticketId,
+    user_id: String(ticketData.user_id),
+    user_name: ticketData.user_name || "Customer",
+    category: ticketData.category || "General Support",
+    order_code: ticketData.order_code || null,
+    status: "open", // 'open', 'replied', 'resolved', 'closed'
+    messages: [
+      {
+        sender: "user",
+        text: ticketData.message || "",
+        photo_file_id: ticketData.photo_file_id || null,
+        time: now
+      }
+    ],
+    created_at: now,
+    updated_at: now
+  };
+
+  db.tickets.push(ticket);
+  save(db);
+  return ticket;
+}
+
+function getTicket(ticketId) {
+  const db = load();
+  if (!Array.isArray(db.tickets)) return null;
+  const cleanId = String(ticketId).trim().toUpperCase().replace(/^#/, "");
+  return db.tickets.find(t => t.id.toUpperCase() === cleanId) || null;
+}
+
+function getUserTickets(userId) {
+  const db = load();
+  if (!Array.isArray(db.tickets)) return [];
+  return db.tickets
+    .filter(t => String(t.user_id) === String(userId))
+    .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+}
+
+function getOpenTickets() {
+  const db = load();
+  if (!Array.isArray(db.tickets)) return [];
+  return db.tickets
+    .filter(t => t.status === "open" || t.status === "replied")
+    .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+}
+
+function getAllTickets() {
+  const db = load();
+  if (!Array.isArray(db.tickets)) return [];
+  return [...db.tickets].sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+}
+
+function addTicketMessage(ticketId, sender, text, photoFileId = null) {
+  const db = load();
+  if (!Array.isArray(db.tickets)) return null;
+  const cleanId = String(ticketId).trim().toUpperCase().replace(/^#/, "");
+  const ticket = db.tickets.find(t => t.id.toUpperCase() === cleanId);
+  if (!ticket) return null;
+
+  const now = new Date().toISOString();
+  if (!Array.isArray(ticket.messages)) ticket.messages = [];
+  ticket.messages.push({
+    sender, // 'user' or 'admin'
+    text: text || "",
+    photo_file_id: photoFileId || null,
+    time: now
+  });
+
+  ticket.status = sender === "admin" ? "replied" : "open";
+  ticket.updated_at = now;
+  save(db);
+  return ticket;
+}
+
+function updateTicketStatus(ticketId, status) {
+  const db = load();
+  if (!Array.isArray(db.tickets)) return null;
+  const cleanId = String(ticketId).trim().toUpperCase().replace(/^#/, "");
+  const ticket = db.tickets.find(t => t.id.toUpperCase() === cleanId);
+  if (!ticket) return null;
+
+  ticket.status = status;
+  ticket.updated_at = new Date().toISOString();
+  save(db);
+  return ticket;
+}
+
 module.exports = {
   initStore,
   getSetting,
@@ -929,5 +1033,12 @@ module.exports = {
   claimReferralReward,
   getChannelPosts,
   getNextChannelPost,
-  addChannelPost
+  addChannelPost,
+  createTicket,
+  getTicket,
+  getUserTickets,
+  getOpenTickets,
+  getAllTickets,
+  addTicketMessage,
+  updateTicketStatus
 };

@@ -46,7 +46,14 @@ const {
   claimReferralReward,
   getChannelPosts,
   getNextChannelPost,
-  addChannelPost
+  addChannelPost,
+  createTicket,
+  getTicket,
+  getUserTickets,
+  getOpenTickets,
+  getAllTickets,
+  addTicketMessage,
+  updateTicketStatus
 } = require("./store");
 const { getRandomCustomerName } = require("./names");
 const { getRealCryptoTransactionProof } = require("./realTransactions");
@@ -701,7 +708,7 @@ bot.action("order:execute_pay", async (ctx) => {
 
   const backMenu = p && p.category === "api_key" ? "menu:apikey" : "menu:buy";
   await ctx.reply(deliveryText, Markup.inlineKeyboard([
-    [Markup.button.callback("💰 My Orders", "menu:orders")],
+    [Markup.button.callback("💰 My Orders", "menu:orders"), Markup.button.callback("🎫 Support / Replacement", `ticket:new_order:${order.order_code}`)],
     [Markup.button.callback(p && p.category === "api_key" ? "🔑 API Keys Store" : "🛍️ Buy More", backMenu)],
     [Markup.button.callback("🏠 Main Menu", "menu:main")]
   ]));
@@ -1051,6 +1058,25 @@ bot.on("text", async (ctx, next) => {
     return displayOrderDetails(ctx, order);
   }
 
+  // If waiting for new support ticket input
+  if (ctx.session.awaitingTicketInput) {
+    if (text.trim() === "/cancel") {
+      ctx.session.awaitingTicketInput = null;
+      return ctx.reply("❎ Ticket creation cancelled.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Support", "menu:support")]]));
+    }
+    return handleCreateTicketFromUser(ctx, text, null);
+  }
+
+  // If waiting for follow-up reply on an existing support ticket
+  if (ctx.session.awaitingTicketReply) {
+    if (text.trim() === "/cancel") {
+      ctx.session.awaitingTicketReply = null;
+      return ctx.reply("❎ Reply cancelled.", Markup.inlineKeyboard([[Markup.button.callback("📂 My Tickets", "ticket:my_list")]]));
+    }
+    const ticketId = ctx.session.awaitingTicketReply;
+    return handleReplyTicketFromUser(ctx, ticketId, text, null);
+  }
+
   // If waiting for deposit payment proof (text TxID)
   if (ctx.session.awaitingProofForDeposit) {
     const depositId = ctx.session.awaitingProofForDeposit;
@@ -1086,6 +1112,19 @@ bot.on("text", async (ctx, next) => {
 });
 
 bot.on("photo", async (ctx, next) => {
+  if (ctx.session.awaitingTicketInput) {
+    const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+    const caption = ctx.message.caption || "Screenshot attached";
+    return handleCreateTicketFromUser(ctx, caption, fileId);
+  }
+
+  if (ctx.session.awaitingTicketReply) {
+    const ticketId = ctx.session.awaitingTicketReply;
+    const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+    const caption = ctx.message.caption || "Screenshot attached";
+    return handleReplyTicketFromUser(ctx, ticketId, caption, fileId);
+  }
+
   if (ctx.session.awaitingProofForDeposit) {
     const depositId = ctx.session.awaitingProofForDeposit;
     ctx.session.awaitingProofForDeposit = null;
@@ -1114,7 +1153,7 @@ bot.on("photo", async (ctx, next) => {
                     Markup.button.callback("💳 Add Funds / Deposit", "deposit:start")
                   ],
                   [
-                    Markup.button.callback("↩️ Reply", "customer:reply")
+                    Markup.button.callback("🎫 Open Ticket", "ticket:new")
                   ]
                 ])
               ).catch(() => {});
@@ -1134,7 +1173,7 @@ bot.on("photo", async (ctx, next) => {
                     Markup.button.callback("💳 Add Funds / Deposit", "deposit:start")
                   ],
                   [
-                    Markup.button.callback("↩️ Reply", "customer:reply")
+                    Markup.button.callback("🎫 Open Ticket", "ticket:new")
                   ]
                 ])
               ).catch(() => {});
@@ -1232,8 +1271,8 @@ bot.action(/^adm_dep_rej:(.+)$/, async (ctx) => {
 
     bot.telegram.sendMessage(
       deposit.user_id,
-      `❌ Your deposit ${deposit.id} of ${money(deposit.amount)} was rejected by admin. Please contact support if you believe this is an error.`,
-      Markup.inlineKeyboard([[Markup.button.callback("💬 Support", "menu:support")]])
+      `❌ Your deposit ${deposit.id} of ${money(deposit.amount)} was rejected by admin. Please open a support ticket if you believe this is an error.`,
+      Markup.inlineKeyboard([[Markup.button.callback("🎫 Open Ticket", "ticket:new")]])
     ).catch(() => {});
   } catch (e) {
     await ctx.reply(`❌ Error: ${e.message}`);
@@ -1372,6 +1411,7 @@ async function displayOrderDetails(ctx, order) {
   }
 
   const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("🎫 Report Issue / Replacement", `ticket:new_order:${order.order_code}`)],
     [Markup.button.callback("💰 Back to Orders", "menu:orders")],
     [Markup.button.callback("🏠 Main Menu", "menu:main")]
   ]);
@@ -1504,39 +1544,441 @@ bot.action("refer:progress_info", async (ctx) => {
   );
 });
 
-// SUPPORT
+// =====================================================
+// IN-BOT SUPPORT & REPLACEMENT TICKET SYSTEM
+// =====================================================
+const TICKET_CATEGORIES = {
+  Replacement: "🔄 Order Replacement / Warranty",
+  Deposit: "💳 Deposit / Balance Issue",
+  Product: "🔑 Account / Redeem Link Help",
+  General: "💬 General Inquiry"
+};
+
+function getTicketStatusBadge(status) {
+  switch (status) {
+    case "open": return "🟢 Open (Awaiting Support)";
+    case "replied": return "💬 Admin Replied";
+    case "resolved": return "✅ Resolved";
+    case "closed": return "🔒 Closed";
+    default: return "🟢 Open";
+  }
+}
+
 async function showSupport(ctx) {
   if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
   const settings = getAllSettings();
+  const user = getOrCreateUser(ctx.from);
+  const userTickets = getUserTickets(user.id);
+  const openCount = userTickets.filter(t => t.status === "open" || t.status === "replied").length;
+
   const rawSupport = settings.support_username || "@aibuyshop_support";
   const cleanSupport = rawSupport.replace(/^https?:\/\/t\.me\//, "").replace("@", "").trim();
   const supportDisplay = cleanSupport ? `@${cleanSupport}` : "@aibuyshop_support";
   const supportUrl = `https://t.me/${cleanSupport || "aibuyshop_support"}`;
 
-  const text = `💬 CUSTOMER SUPPORT
+  const text = `💬 <b>OFFICIAL SUPPORT & WARRANTY DESK</b>
+━━━━━━━━━━━━━━━━━━━━
+🟢 <b>Helpdesk Status:</b> Online (24/7 Active)
+⚡ <b>Avg. Response Time:</b> &lt; 15 Minutes
+🛡️ <b>Replacement Guarantee:</b> 100% Active
+🎫 <b>Your Active Tickets:</b> ${openCount} Open (${userTickets.length} Total)
 
-Need assistance with an order, redeem link, or deposit?
-Our team is available 24/7.
+👤 <b>Direct Support:</b> ${escapeHtml(supportDisplay)}
+📢 <b>Official Channel:</b> ${escapeHtml(settings.channel_link || "")}
+👥 <b>Community Group:</b> ${escapeHtml(settings.group_link || "")}
 
-👤 Admin Support: ${supportDisplay}
-📢 Channel: ${settings.channel_link}
-👥 Group: ${settings.group_link}
-
-Please include your Order Code or Deposit ID when contacting support for fastest assistance!`;
+━━━━━━━━━━━━━━━━━━━━
+💡 <i>Open an official <b>Support Ticket</b> below to get a tracking ID (e.g. <code>#TKT-1001</code>), request an instant replacement, or track your issue directly inside the bot!</i>`;
 
   const buttons = Markup.inlineKeyboard([
-    [Markup.button.url("💬 Contact Support", supportUrl)],
+    [Markup.button.callback("🎫 Open Support / Replacement Ticket", "ticket:new")],
+    [Markup.button.callback(`📂 My Support Tickets (${userTickets.length})`, "ticket:my_list")],
+    [Markup.button.url("💬 Direct Telegram Chat", supportUrl)],
     [Markup.button.callback("🔙 Main Menu", "menu:main")]
   ]);
 
   if (ctx.callbackQuery) {
     try {
-      await ctx.editMessageText(text, buttons);
+      await ctx.editMessageText(text, { parse_mode: "HTML", disable_web_page_preview: true, ...buttons });
       return;
     } catch (e) {}
   }
-  await ctx.reply(text, buttons);
+  await ctx.reply(text, { parse_mode: "HTML", disable_web_page_preview: true, ...buttons });
 }
+
+// Step 1: Select ticket category
+bot.action("ticket:new", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const text = `🎫 <b>OPEN NEW SUPPORT TICKET</b>
+━━━━━━━━━━━━━━━━━━━━
+Please select the category that best describes your issue:`;
+
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("🔄 Order Replacement / Warranty", "ticket:cat:Replacement")],
+    [Markup.button.callback("💳 Deposit / Balance Issue", "ticket:cat:Deposit")],
+    [Markup.button.callback("🔑 Account / Redeem Link Help", "ticket:cat:Product")],
+    [Markup.button.callback("💬 General Question", "ticket:cat:General")],
+    [Markup.button.callback("🔙 Back to Support", "menu:support")]
+  ]);
+
+  try {
+    return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
+  } catch (e) {
+    return await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+  }
+});
+
+// Shortcut: Open ticket directly from an order
+bot.action(/^ticket:new_order:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const orderCode = ctx.match[1];
+  const category = TICKET_CATEGORIES.Replacement;
+  ctx.session.awaitingTicketInput = { category, orderCode };
+
+  const text = `🎫 <b>NEW REPLACEMENT / SUPPORT TICKET</b>
+━━━━━━━━━━━━━━━━━━━━
+📂 <b>Category:</b> ${escapeHtml(category)}
+📦 <b>Order Code:</b> <code>${escapeHtml(orderCode)}</code>
+
+✍️ <b>Please describe the issue in detail below</b> (or send a screenshot with a caption explaining the problem):`;
+
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("❌ Cancel", "menu:support")]
+  ]);
+
+  try {
+    return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
+  } catch (e) {
+    return await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+  }
+});
+
+// Step 2: Category chosen -> If Replacement or Product and user has orders, let them pick order
+bot.action(/^ticket:cat:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const catKey = ctx.match[1];
+  const category = TICKET_CATEGORIES[catKey] || "General Support";
+
+  if (catKey === "Replacement" || catKey === "Product") {
+    const orders = getUserOrders(ctx.from.id);
+    if (orders.length > 0) {
+      const text = `🎫 <b>SELECT RELATED ORDER</b>
+━━━━━━━━━━━━━━━━━━━━
+📂 <b>Category:</b> ${escapeHtml(category)}
+
+Select the order you need help with below, or tap <b>Skip</b> if not listed:`;
+
+      const buttons = orders.slice(0, 5).map((o) => [
+        Markup.button.callback(
+          `📦 ${o.order_code} — ${o.product_name} (${money(o.total_price)})`,
+          `ticket:ord_sel:${catKey}:${o.order_code}`
+        )
+      ]);
+      buttons.push([Markup.button.callback("⏭️ Skip / Other Order", `ticket:ord_sel:${catKey}:NONE`)]);
+      buttons.push([Markup.button.callback("🔙 Back", "ticket:new")]);
+
+      try {
+        return await ctx.editMessageText(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+      } catch (e) {
+        return await ctx.reply(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+      }
+    }
+  }
+
+  ctx.session.awaitingTicketInput = { category, orderCode: null };
+  const text = `🎫 <b>DESCRIBE YOUR ISSUE</b>
+━━━━━━━━━━━━━━━━━━━━
+📂 <b>Category:</b> ${escapeHtml(category)}
+
+✍️ <b>Please write your message below</b> (include any Order ID / Deposit ID, or send a photo screenshot with caption):`;
+
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("❌ Cancel", "menu:support")]
+  ]);
+
+  try {
+    return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
+  } catch (e) {
+    return await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+  }
+});
+
+// Step 2b: Order selected -> Prompt for issue description
+bot.action(/^ticket:ord_sel:([^:]+):(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const catKey = ctx.match[1];
+  const rawOrder = ctx.match[2];
+  const category = TICKET_CATEGORIES[catKey] || "General Support";
+  const orderCode = rawOrder === "NONE" ? null : rawOrder;
+
+  ctx.session.awaitingTicketInput = { category, orderCode };
+
+  const text = `🎫 <b>DESCRIBE YOUR ISSUE</b>
+━━━━━━━━━━━━━━━━━━━━
+📂 <b>Category:</b> ${escapeHtml(category)}${orderCode ? `\n📦 <b>Order Ref:</b> <code>${escapeHtml(orderCode)}</code>` : ""}
+
+✍️ <b>Please write your message below</b> (or send a screenshot with caption):`;
+
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("❌ Cancel", "menu:support")]
+  ]);
+
+  try {
+    return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
+  } catch (e) {
+    return await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+  }
+});
+
+// Create ticket handler (called from text or photo handler)
+async function handleCreateTicketFromUser(ctx, messageText, photoFileId = null) {
+  const draft = ctx.session.awaitingTicketInput;
+  ctx.session.awaitingTicketInput = null;
+
+  const user = getOrCreateUser(ctx.from);
+  const userName = user.username ? `@${user.username}` : ([user.first_name, user.last_name].filter(Boolean).join(" ") || "Customer");
+
+  const ticket = createTicket({
+    user_id: user.id,
+    user_name: userName,
+    category: draft?.category || "General Support",
+    order_code: draft?.orderCode || null,
+    message: messageText,
+    photo_file_id: photoFileId
+  });
+
+  // Notify Customer with official Ticket Receipt
+  const receiptText = `✅ <b>OFFICIAL SUPPORT TICKET CREATED</b>
+━━━━━━━━━━━━━━━━━━━━
+🎫 <b>Ticket ID:</b> <code>#${ticket.id}</code>
+📂 <b>Category:</b> ${escapeHtml(ticket.category)}${ticket.order_code ? `\n📦 <b>Order Ref:</b> <code>${escapeHtml(ticket.order_code)}</code>` : ""}
+🟢 <b>Status:</b> Open (Assigned to Support Desk)
+⏱️ <b>Est. Response:</b> Within 15 Minutes
+
+💬 <b>Your Message:</b>
+<i>${escapeHtml(messageText)}</i>
+
+━━━━━━━━━━━━━━━━━━━━
+🔔 You will receive an instant notification here as soon as our admin replies to <b>#${ticket.id}</b>.`;
+
+  await ctx.reply(receiptText, {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback(`📂 View Ticket #${ticket.id}`, `ticket:view:${ticket.id}`)],
+      [Markup.button.callback("🏠 Main Menu", "menu:main")]
+    ])
+  });
+
+  // Notify Admin
+  const adminMsg = `🎫 <b>NEW SUPPORT TICKET OPENED!</b>
+━━━━━━━━━━━━━━━━━━━━
+🆔 <b>Ticket:</b> <code>#${ticket.id}</code>
+👤 <b>Customer:</b> ${escapeHtml(userName)} (<code>${user.id}</code>)
+📂 <b>Category:</b> ${escapeHtml(ticket.category)}${ticket.order_code ? `\n📦 <b>Order Code:</b> <code>${escapeHtml(ticket.order_code)}</code>` : ""}
+⏰ <b>Time:</b> ${new Date(ticket.created_at).toLocaleString()}
+
+💬 <b>Message:</b>
+${escapeHtml(messageText)}`;
+
+  const adminButtons = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(`↩️ Reply (#${ticket.id})`, `adm_tkt_reply:${ticket.id}`),
+      Markup.button.callback("✅ Mark Resolved", `adm_tkt_resolve:${ticket.id}`)
+    ],
+    [Markup.button.callback("📂 View Full Ticket", `adm_tkt_view:${ticket.id}`)]
+  ]);
+
+  try {
+    if (photoFileId) {
+      await bot.telegram.sendPhoto(ADMIN_ID, photoFileId, {
+        caption: adminMsg,
+        parse_mode: "HTML",
+        ...adminButtons
+      });
+    } else {
+      await bot.telegram.sendMessage(ADMIN_ID, adminMsg, {
+        parse_mode: "HTML",
+        ...adminButtons
+      });
+    }
+  } catch (err) {
+    console.error("Failed to notify admin of new ticket:", err.message || err);
+  }
+}
+
+// Follow-up reply handler (called from text or photo handler)
+async function handleReplyTicketFromUser(ctx, ticketId, messageText, photoFileId = null) {
+  ctx.session.awaitingTicketReply = null;
+  const ticket = addTicketMessage(ticketId, "user", messageText, photoFileId);
+  if (!ticket) {
+    return ctx.reply("❌ Ticket not found.", Markup.inlineKeyboard([[Markup.button.callback("📂 My Tickets", "ticket:my_list")]]));
+  }
+
+  await ctx.reply(
+    `✅ Your reply has been added to Ticket <b>#${ticket.id}</b>.\nOur support team has been notified!`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback(`📂 View Ticket #${ticket.id}`, `ticket:view:${ticket.id}`)],
+        [Markup.button.callback("🏠 Main Menu", "menu:main")]
+      ])
+    }
+  );
+
+  // Notify Admin
+  const adminMsg = `💬 <b>NEW CUSTOMER REPLY ON #${ticket.id}</b>
+━━━━━━━━━━━━━━━━━━━━
+👤 <b>Customer:</b> ${escapeHtml(ticket.user_name)} (<code>${ticket.user_id}</code>)
+📂 <b>Category:</b> ${escapeHtml(ticket.category)}${ticket.order_code ? `\n📦 <b>Order:</b> <code>${escapeHtml(ticket.order_code)}</code>` : ""}
+
+💬 <b>Reply:</b>
+${escapeHtml(messageText)}`;
+
+  const adminButtons = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(`↩️ Reply (#${ticket.id})`, `adm_tkt_reply:${ticket.id}`),
+      Markup.button.callback("✅ Mark Resolved", `adm_tkt_resolve:${ticket.id}`)
+    ],
+    [Markup.button.callback("📂 View Full Ticket", `adm_tkt_view:${ticket.id}`)]
+  ]);
+
+  try {
+    if (photoFileId) {
+      await bot.telegram.sendPhoto(ADMIN_ID, photoFileId, {
+        caption: adminMsg,
+        parse_mode: "HTML",
+        ...adminButtons
+      });
+    } else {
+      await bot.telegram.sendMessage(ADMIN_ID, adminMsg, {
+        parse_mode: "HTML",
+        ...adminButtons
+      });
+    }
+  } catch (err) {
+    console.error("Failed to notify admin of ticket reply:", err.message || err);
+  }
+}
+
+// Customer: List My Tickets
+bot.action("ticket:my_list", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const tickets = getUserTickets(ctx.from.id);
+
+  if (tickets.length === 0) {
+    const text = `📂 <b>MY SUPPORT TICKETS</b>\n\nYou have not opened any support tickets yet.`;
+    const buttons = Markup.inlineKeyboard([
+      [Markup.button.callback("🎫 Open New Ticket", "ticket:new")],
+      [Markup.button.callback("🔙 Back to Support", "menu:support")]
+    ]);
+    try {
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
+    } catch (e) {
+      return await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+    }
+  }
+
+  let text = `📂 <b>MY SUPPORT TICKETS (${tickets.length})</b>\n━━━━━━━━━━━━━━━━━━━━\nSelect a ticket below to view messages or reply:`;
+  const buttons = tickets.slice(0, 10).map((t) => {
+    const icon = t.status === "replied" ? "💬" : t.status === "open" ? "🟢" : "✅";
+    return [
+      Markup.button.callback(
+        `${icon} #${t.id} — ${t.category.replace(/^[^\s]+\s/, "")} [${t.status.toUpperCase()}]`,
+        `ticket:view:${t.id}`
+      )
+    ];
+  });
+  buttons.push([Markup.button.callback("🎫 Open New Ticket", "ticket:new")]);
+  buttons.push([Markup.button.callback("🔙 Support Menu", "menu:support")]);
+
+  try {
+    return await ctx.editMessageText(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+  } catch (e) {
+    return await ctx.reply(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+  }
+});
+
+// Customer: View Ticket Details & Conversation
+bot.action(/^ticket:view:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const ticket = getTicket(ctx.match[1]);
+  if (!ticket) {
+    return ctx.reply("❌ Ticket not found.");
+  }
+
+  let threadText = "";
+  const recentMsgs = (ticket.messages || []).slice(-6);
+  recentMsgs.forEach((m) => {
+    const senderLabel = m.sender === "admin" ? "👨‍💻 <b>Admin Support</b>" : "👤 <b>You</b>";
+    const photoTag = m.photo_file_id ? " <i>[📸 Screenshot]</i>" : "";
+    threadText += `\n${senderLabel}:${photoTag}\n${escapeHtml(m.text)}\n`;
+  });
+
+  const text = `🎫 <b>TICKET #${ticket.id}</b>
+━━━━━━━━━━━━━━━━━━━━
+📂 <b>Category:</b> ${escapeHtml(ticket.category)}${ticket.order_code ? `\n📦 <b>Order Code:</b> <code>${escapeHtml(ticket.order_code)}</code>` : ""}
+📌 <b>Status:</b> ${getTicketStatusBadge(ticket.status)}
+📅 <b>Opened:</b> ${new Date(ticket.created_at).toLocaleString()}
+
+━━━━━━━━━━━━━━━━━━━━
+💬 <b>CONVERSATION HISTORY:</b>
+${threadText}`;
+
+  const rows = [];
+  if (ticket.status !== "resolved" && ticket.status !== "closed") {
+    rows.push([
+      Markup.button.callback("↩️ Add Reply / Screenshot", `ticket:reply:${ticket.id}`),
+      Markup.button.callback("✅ Mark Resolved", `ticket:close:${ticket.id}`)
+    ]);
+  } else {
+    rows.push([Markup.button.callback("🔄 Reopen / Reply to Ticket", `ticket:reply:${ticket.id}`)]);
+  }
+  rows.push([
+    Markup.button.callback("📂 My Tickets", "ticket:my_list"),
+    Markup.button.callback("🏠 Main Menu", "menu:main")
+  ]);
+
+  try {
+    return await ctx.editMessageText(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(rows) });
+  } catch (e) {
+    return await ctx.reply(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(rows) });
+  }
+});
+
+// Customer: Reply to existing ticket
+bot.action(/^ticket:reply:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const ticketId = ctx.match[1];
+  const ticket = getTicket(ticketId);
+  if (!ticket) return ctx.reply("❌ Ticket not found.");
+
+  ctx.session.awaitingTicketReply = ticket.id;
+  return ctx.reply(
+    `✍️ <b>Write your reply for Ticket #${ticket.id} below</b> (you can also send a screenshot):`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", `ticket:view:${ticket.id}`)]])
+    }
+  );
+});
+
+// Customer: Close / Resolve ticket
+bot.action(/^ticket:close:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery("Ticket marked as resolved!").catch(() => {});
+  const ticket = updateTicketStatus(ctx.match[1], "resolved");
+  if (!ticket) return ctx.reply("❌ Ticket not found.");
+
+  const text = `✅ <b>Ticket #${ticket.id} has been marked as Resolved.</b>\n\nThank you for using Gemini Shop Support! If you need anything else, you can reopen or create a new ticket anytime.`;
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("📂 My Tickets", "ticket:my_list"), Markup.button.callback("🏠 Main Menu", "menu:main")]
+  ]);
+
+  try {
+    return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
+  } catch (e) {
+    return await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+  }
+});
 
 // =====================================================
 // AI API KEYS & CLOUD TOKENS (Dedicated Store Section)
@@ -1587,6 +2029,7 @@ bot.action("adm:menu", async (ctx) => {
 
 async function showAdminDashboard(ctx) {
   const pendingDeps = getPendingDeposits().length;
+  const openTickets = getOpenTickets().length;
   const products = getProducts().length;
   const users = getAllUsers().length;
 
@@ -1596,11 +2039,13 @@ async function showAdminDashboard(ctx) {
 • Registered Users: ${users}
 • Products: ${products}
 • Pending Deposits: ${pendingDeps}
+• Open Support Tickets: ${openTickets}
 
 Select an action below:`;
 
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback(`📥 Pending Deposits (${pendingDeps})`, "adm:deposits")],
+    [Markup.button.callback(`🎫 Support Tickets (${openTickets} Open)`, "adm:tickets")],
     [Markup.button.callback("🛍️ Products & Inventory", "adm:products")],
     [Markup.button.callback("👥 Customers & Direct Messages", "adm:customers:0")],
     [Markup.button.callback("🆔 Message by Telegram ID", "adm:msg_by_id")],
@@ -1621,16 +2066,162 @@ Select an action below:`;
   await ctx.reply(text, buttons);
 }
 
-// Customer taps this button under any admin message to reply through the bot.
-bot.action("customer:reply", async (ctx) => {
-  if (isAdmin(ctx)) {
-    await ctx.answerCbQuery("This button is for customers.").catch(() => {});
-    return;
-  }
-  ctx.session.awaitingSupportReply = true;
+// Admin: View Support Tickets List
+bot.action("adm:tickets", async (ctx) => {
+  if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
-  return ctx.reply("✍️ Type your reply here and send it. Your message will be delivered to the admin.",
-    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel Reply", "customer:cancel_reply")]]));
+
+  const openList = getOpenTickets();
+  const allList = getAllTickets();
+  const displayList = openList.length > 0 ? openList : allList.slice(0, 10);
+
+  if (displayList.length === 0) {
+    return ctx.reply(
+      "✅ No support tickets found.",
+      Markup.inlineKeyboard([[Markup.button.callback("🔙 Admin Menu", "adm:menu")]])
+    );
+  }
+
+  const headerLabel = openList.length > 0
+    ? `🎫 <b>OPEN SUPPORT TICKETS (${openList.length})</b>`
+    : `🎫 <b>RECENT SUPPORT TICKETS (${displayList.length})</b>`;
+
+  const text = `${headerLabel}\n━━━━━━━━━━━━━━━━━━━━\nSelect a ticket below to view conversation, reply, or resolve:`;
+
+  const buttons = displayList.slice(0, 12).map((t) => {
+    const icon = t.status === "open" ? "🟢" : t.status === "replied" ? "💬" : "✅";
+    return [
+      Markup.button.callback(
+        `${icon} #${t.id} — ${t.user_name} (${t.category.replace(/^[^\s]+\s/, "")})`,
+        `adm_tkt_view:${t.id}`
+      )
+    ];
+  });
+  buttons.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
+
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+    } catch (e) {}
+  }
+  await ctx.reply(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+});
+
+// Admin: View Individual Ticket
+bot.action(/^adm_tkt_view:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const ticket = getTicket(ctx.match[1]);
+  if (!ticket) return ctx.reply("❌ Ticket not found.");
+
+  let threadText = "";
+  const recentMsgs = (ticket.messages || []).slice(-8);
+  let lastPhotoId = null;
+  recentMsgs.forEach((m) => {
+    const senderLabel = m.sender === "admin" ? "👨‍💻 <b>Admin</b>" : `👤 <b>${escapeHtml(ticket.user_name)}</b>`;
+    const photoTag = m.photo_file_id ? " <i>[📸 Screenshot]</i>" : "";
+    if (m.photo_file_id) lastPhotoId = m.photo_file_id;
+    threadText += `\n${senderLabel}:${photoTag}\n${escapeHtml(m.text)}\n`;
+  });
+
+  const text = `🎫 <b>ADMIN TICKET VIEW: #${ticket.id}</b>
+━━━━━━━━━━━━━━━━━━━━
+👤 <b>Customer:</b> ${escapeHtml(ticket.user_name)} (<code>${ticket.user_id}</code>)
+📂 <b>Category:</b> ${escapeHtml(ticket.category)}${ticket.order_code ? `\n📦 <b>Order Code:</b> <code>${escapeHtml(ticket.order_code)}</code>` : ""}
+📌 <b>Status:</b> ${getTicketStatusBadge(ticket.status)}
+📅 <b>Created:</b> ${new Date(ticket.created_at).toLocaleString()}
+
+━━━━━━━━━━━━━━━━━━━━
+💬 <b>MESSAGES:</b>
+${threadText}`;
+
+  const buttons = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(`↩️ Reply (#${ticket.id})`, `adm_tkt_reply:${ticket.id}`),
+      Markup.button.callback("✅ Mark Resolved", `adm_tkt_resolve:${ticket.id}`)
+    ],
+    [Markup.button.callback("🔙 Tickets List", "adm:tickets"), Markup.button.callback("🏠 Admin Menu", "adm:menu")]
+  ]);
+
+  if (lastPhotoId) {
+    return ctx.replyWithPhoto(lastPhotoId, { caption: text, parse_mode: "HTML", ...buttons });
+  }
+
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
+    } catch (e) {}
+  }
+  await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+});
+
+// Admin: Reply to Ticket prompt
+bot.action(/^adm_tkt_reply:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const ticket = getTicket(ctx.match[1]);
+  if (!ticket) return ctx.reply("❌ Ticket not found.");
+
+  ctx.session.adminAction = { type: "ticket_reply", ticketId: ticket.id };
+  return ctx.reply(
+    `✍️ <b>Write your reply for Ticket #${ticket.id}</b> (Customer: ${escapeHtml(ticket.user_name)}):\n\nSend <code>/cancel</code> to cancel.`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", `adm_tkt_view:${ticket.id}`)]])
+    }
+  );
+});
+
+// Admin: Resolve Ticket
+bot.action(/^adm_tkt_resolve:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery("Ticket marked as resolved!").catch(() => {});
+  const ticket = updateTicketStatus(ctx.match[1], "resolved");
+  if (!ticket) return ctx.reply("❌ Ticket not found.");
+
+  // Notify Customer
+  try {
+    await bot.telegram.sendMessage(
+      ticket.user_id,
+      `✅ <b>SUPPORT TICKET RESOLVED (#${ticket.id})</b>\n━━━━━━━━━━━━━━━━━━━━\nYour support ticket <b>#${ticket.id}</b> (${escapeHtml(ticket.category)}) has been marked as <b>Resolved</b> by our Support Team.\n\nIf you still need assistance, you can reply below to reopen it anytime!`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback(`🔄 Reopen / Reply (#${ticket.id})`, `ticket:reply:${ticket.id}`)],
+          [Markup.button.callback("🏠 Main Menu", "menu:main")]
+        ])
+      }
+    );
+  } catch (e) {}
+
+  return ctx.reply(
+    `✅ Ticket <b>#${ticket.id}</b> marked as Resolved and customer notified.`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("🎫 Back to Tickets", "adm:tickets")],
+        [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+      ])
+    }
+  );
+});
+
+// Backwards compatibility: if customer taps an older message's button, open the Support Ticket flow
+bot.action("customer:reply", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const text = `🎫 <b>OPEN NEW SUPPORT TICKET</b>
+━━━━━━━━━━━━━━━━━━━━
+Please select the category that best describes your issue:`;
+
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("🔄 Order Replacement / Warranty", "ticket:cat:Replacement")],
+    [Markup.button.callback("💳 Deposit / Balance Issue", "ticket:cat:Deposit")],
+    [Markup.button.callback("🔑 Account / Redeem Link Help", "ticket:cat:Product")],
+    [Markup.button.callback("💬 General Question", "ticket:cat:General")],
+    [Markup.button.callback("🔙 Back to Support", "menu:support")]
+  ]);
+
+  return ctx.reply(text, { parse_mode: "HTML", ...buttons });
 });
 
 bot.action("customer:cancel_reply", async (ctx) => {
@@ -2620,6 +3211,44 @@ async function handleAdminTextInput(ctx, text) {
         ])
       );
     }
+    case "ticket_reply": {
+      const ticket = addTicketMessage(action.ticketId, "admin", text.trim());
+      if (!ticket) {
+        return ctx.reply("❌ Ticket not found.", Markup.inlineKeyboard([[Markup.button.callback("🎫 Tickets List", "adm:tickets")]]));
+      }
+      try {
+        await bot.telegram.sendMessage(
+          ticket.user_id,
+          `🔔 <b>SUPPORT TICKET UPDATE (#${ticket.id})</b>\n━━━━━━━━━━━━━━━━━━━━\n📂 <b>Category:</b> ${escapeHtml(ticket.category)}${ticket.order_code ? `\n📦 <b>Order Code:</b> <code>${escapeHtml(ticket.order_code)}</code>` : ""}\n\n👨‍💻 <b>Support Team Reply:</b>\n${escapeHtml(text.trim())}`,
+          {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard([
+              [
+                Markup.button.callback(`↩️ Reply (#${ticket.id})`, `ticket:reply:${ticket.id}`),
+                Markup.button.callback("✅ Mark Resolved", `ticket:close:${ticket.id}`)
+              ],
+              [Markup.button.callback(`📂 View Ticket #${ticket.id}`, `ticket:view:${ticket.id}`)]
+            ])
+          }
+        );
+        return ctx.reply(
+          `✅ Reply sent to Customer on Ticket <b>#${ticket.id}</b>!`,
+          {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback(`📂 View Ticket #${ticket.id}`, `adm_tkt_view:${ticket.id}`)],
+              [Markup.button.callback("🎫 All Tickets", "adm:tickets")],
+              [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+            ])
+          }
+        );
+      } catch (e) {
+        return ctx.reply(
+          `⚠️ Reply saved to Ticket #${ticket.id}, but could not deliver notification to customer (${e.message || "blocked bot"}).`,
+          Markup.inlineKeyboard([[Markup.button.callback("🎫 All Tickets", "adm:tickets")]])
+        );
+      }
+    }
     case "msg_by_id_prompt": {
       const parts = text.trim().split(/\s+/);
       const targetId = parts[0].trim();
@@ -2636,7 +3265,7 @@ async function handleAdminTextInput(ctx, text) {
       try {
         await bot.telegram.sendMessage(targetId, inlineMsg, Markup.inlineKeyboard([
           [
-            Markup.button.callback("↩️ Reply", "customer:reply"),
+            Markup.button.callback("🎫 Open Ticket", "ticket:new"),
             Markup.button.callback("🛍️ Buy", "menu:buy")
           ]
         ]));
@@ -2655,7 +3284,7 @@ async function handleAdminTextInput(ctx, text) {
       try {
         await bot.telegram.sendMessage(targetId, text, Markup.inlineKeyboard([
           [
-            Markup.button.callback("↩️ Reply", "customer:reply"),
+            Markup.button.callback("🎫 Open Ticket", "ticket:new"),
             Markup.button.callback("🛍️ Buy", "menu:buy")
           ]
         ]));
@@ -2674,7 +3303,7 @@ async function handleAdminTextInput(ctx, text) {
       try {
         await bot.telegram.sendMessage(targetId, text, Markup.inlineKeyboard([
           [
-            Markup.button.callback("↩️ Reply", "customer:reply"),
+            Markup.button.callback("🎫 Open Ticket", "ticket:new"),
             Markup.button.callback("🛍️ Buy", "menu:buy")
           ]
         ]));
@@ -2694,7 +3323,7 @@ async function handleAdminTextInput(ctx, text) {
         try {
           await bot.telegram.sendMessage(u.id, text, Markup.inlineKeyboard([
             [
-              Markup.button.callback("↩️ Reply", "customer:reply"),
+              Markup.button.callback("🎫 Open Ticket", "ticket:new"),
               Markup.button.callback("🛍️ Buy", "menu:buy")
             ]
           ]));

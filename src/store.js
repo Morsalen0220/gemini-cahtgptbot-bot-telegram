@@ -509,6 +509,10 @@ function getOrCreateUser(telegramUser, referrerId = null) {
       referral_earnings: 0.0,
       claimed_referral_rewards: 0,
       is_verified: false,
+      is_blocked: false,
+      blocked_at: null,
+      sent_message_ids: [],
+      last_message_id: 0,
       api_key: `ak_${crypto.randomBytes(16).toString("hex")}`,
       created_at: new Date().toISOString()
     };
@@ -558,6 +562,125 @@ function getUserByApiKey(apiKey) {
 
 function getAllUsers() {
   return Object.values(load().users);
+}
+
+function isUserBlocked(userId) {
+  if (!userId) return false;
+  const db = load();
+  return Boolean(db.users[String(userId)]?.is_blocked);
+}
+
+function setUserBlocked(userId, blocked = true) {
+  const db = load();
+  const idStr = String(userId);
+  if (!db.users[idStr]) {
+    db.users[idStr] = {
+      id: Number(userId) || userId,
+      username: "",
+      first_name: "",
+      last_name: "",
+      wallet_balance: 0.0,
+      total_spent: 0.0,
+      orders_count: 0,
+      referred_by: null,
+      referral_count: 0,
+      referral_earnings: 0.0,
+      claimed_referral_rewards: 0,
+      is_verified: false,
+      is_blocked: Boolean(blocked),
+      blocked_at: blocked ? new Date().toISOString() : null,
+      sent_message_ids: [],
+      last_message_id: 0,
+      api_key: `ak_${crypto.randomBytes(16).toString("hex")}`,
+      created_at: new Date().toISOString()
+    };
+  } else {
+    db.users[idStr].is_blocked = Boolean(blocked);
+    db.users[idStr].blocked_at = blocked ? new Date().toISOString() : null;
+  }
+  save(db);
+  return db.users[idStr];
+}
+
+function getBlockedUsers() {
+  return Object.values(load().users).filter(u => Boolean(u.is_blocked));
+}
+
+function findUserByIdOrUsername(query) {
+  if (!query) return null;
+  const clean = String(query).trim();
+  const db = load();
+  if (db.users[clean]) return db.users[clean];
+  const withoutAt = clean.replace(/^@/, "").toLowerCase();
+  return Object.values(db.users).find(u => (u.username || "").toLowerCase() === withoutAt) || null;
+}
+
+function recordUserMessageId(userId, messageId) {
+  const msgId = Number(messageId);
+  if (!userId || !msgId || msgId <= 0) return;
+  const db = load();
+  const idStr = String(userId);
+  if (!db.users[idStr]) {
+    db.users[idStr] = {
+      id: Number(userId) || userId,
+      username: "",
+      first_name: "",
+      last_name: "",
+      wallet_balance: 0.0,
+      total_spent: 0.0,
+      orders_count: 0,
+      is_blocked: false,
+      sent_message_ids: [msgId],
+      last_message_id: msgId,
+      api_key: `ak_${crypto.randomBytes(16).toString("hex")}`,
+      created_at: new Date().toISOString()
+    };
+    save(db);
+    return;
+  }
+  const u = db.users[idStr];
+  if (!Array.isArray(u.sent_message_ids)) u.sent_message_ids = [];
+  if (!u.sent_message_ids.includes(msgId)) {
+    u.sent_message_ids.push(msgId);
+    if (u.sent_message_ids.length > 500) {
+      u.sent_message_ids = u.sent_message_ids.slice(-500);
+    }
+  }
+  if (!u.last_message_id || msgId > u.last_message_id) {
+    u.last_message_id = msgId;
+  }
+  save(db);
+}
+
+function recordUserLastSeenMessageId(userId, messageId) {
+  const msgId = Number(messageId);
+  if (!userId || !msgId || msgId <= 0) return;
+  const db = load();
+  const idStr = String(userId);
+  const u = db.users[idStr];
+  if (!u) return;
+  if (!u.last_message_id || msgId > u.last_message_id) {
+    u.last_message_id = msgId;
+    save(db);
+  }
+}
+
+function getUserSentMessageIds(userId) {
+  const db = load();
+  const u = db.users[String(userId)];
+  if (!u) return { sentIds: [], lastMessageId: 0 };
+  return {
+    sentIds: Array.isArray(u.sent_message_ids) ? [...u.sent_message_ids] : [],
+    lastMessageId: Number(u.last_message_id) || 0
+  };
+}
+
+function clearUserSentMessageIds(userId) {
+  const db = load();
+  const u = db.users[String(userId)];
+  if (!u) return;
+  u.sent_message_ids = [];
+  save(db);
 }
 
 function recordDepositPaidClick(userId) {
@@ -1013,6 +1136,14 @@ module.exports = {
   regenerateApiKey,
   getUserByApiKey,
   getAllUsers,
+  isUserBlocked,
+  setUserBlocked,
+  getBlockedUsers,
+  findUserByIdOrUsername,
+  recordUserMessageId,
+  recordUserLastSeenMessageId,
+  getUserSentMessageIds,
+  clearUserSentMessageIds,
   recordDepositPaidClick,
   markDepositAutoMsgSent,
   markSecondDepositScreenshotMsgSent,

@@ -26,6 +26,14 @@ const {
   regenerateApiKey,
   getUserByApiKey,
   getAllUsers,
+  isUserBlocked,
+  setUserBlocked,
+  getBlockedUsers,
+  findUserByIdOrUsername,
+  recordUserMessageId,
+  recordUserLastSeenMessageId,
+  getUserSentMessageIds,
+  clearUserSentMessageIds,
   recordDepositPaidClick,
   markDepositAutoMsgSent,
   markSecondDepositScreenshotMsgSent,
@@ -93,6 +101,209 @@ bot.use(
 
 bot.use((ctx, next) => {
   ctx.session ??= {};
+  return next();
+});
+
+// =====================================================
+// OUTGOING API INTERCEPTOR & MESSAGE TRACKING / BLOCK GUARD
+// =====================================================
+const rawCallApi = bot.telegram.callApi.bind(bot.telegram);
+
+const OUTGOING_USER_METHODS = new Set([
+  "sendMessage",
+  "sendPhoto",
+  "sendDocument",
+  "sendVideo",
+  "sendAnimation",
+  "sendAudio",
+  "sendVoice",
+  "sendVideoNote",
+  "sendSticker",
+  "sendMediaGroup",
+  "copyMessage",
+  "copyMessages",
+  "forwardMessage",
+  "forwardMessages",
+  "editMessageText",
+  "editMessageCaption",
+  "editMessageMedia",
+  "editMessageReplyMarkup",
+  "sendChatAction"
+]);
+
+function isPrivateCustomerChatId(chatId) {
+  if (chatId === undefined || chatId === null) return false;
+  const s = String(chatId).trim();
+  if (!s || s === ADMIN_ID) return false;
+  if (s.startsWith("-") || s.startsWith("@")) return false;
+  return /^\d+$/.test(s);
+}
+
+bot.telegram.callApi = async function (method, payload = {}, ...rest) {
+  const targetChatId = payload?.chat_id !== undefined ? String(payload.chat_id).trim() : null;
+  const isCustomerTarget = isPrivateCustomerChatId(targetChatId);
+
+  // Never send any text, media, or update to a blocked user
+  if (isCustomerTarget && OUTGOING_USER_METHODS.has(method) && !payload?._allowWhenBlocked && isUserBlocked(targetChatId)) {
+    return { message_id: 0, chat: { id: payload.chat_id, type: "private" } };
+  }
+
+  let cleanPayload = payload;
+  if (payload && payload._allowWhenBlocked) {
+    cleanPayload = { ...payload };
+    delete cleanPayload._allowWhenBlocked;
+  }
+
+  const res = await rawCallApi(method, cleanPayload, ...rest);
+
+  // Record every message_id sent by the bot to a customer so it can be deleted if they are blocked
+  if (isCustomerTarget && res) {
+    if (typeof res.message_id === "number" && res.message_id > 0) {
+      recordUserMessageId(targetChatId, res.message_id);
+    } else if (Array.isArray(res)) {
+      for (const item of res) {
+        if (item && typeof item.message_id === "number" && item.message_id > 0) {
+          recordUserMessageId(targetChatId, item.message_id);
+        }
+      }
+    }
+  }
+
+  return res;
+};
+
+// Delete all previously sent bot messages in the user's private chat so they cannot see past messages
+async function purgeUserChatMessages(userId) {
+  const targetId = String(userId).trim();
+  if (!/^\d+$/.test(targetId)) return { deletedCount: 0 };
+
+  const { sentIds, lastMessageId } = getUserSentMessageIds(targetId);
+  let maxMsgId = Math.max(lastMessageId || 0, ...(sentIds.length ? sentIds : [0]));
+
+  // Send a brief silent probe with ReplyKeyboardRemove to remove the bottom menu keyboard
+  // and discover the latest message_id in the chat in case older messages existed before tracking
+  let probeMsgId = 0;
+  try {
+    const probe = await rawCallApi("sendMessage", {
+      chat_id: targetId,
+      text: "🚫",
+      disable_notification: true,
+      reply_markup: { remove_keyboard: true }
+    });
+    if (probe && probe.message_id) {
+      probeMsgId = Number(probe.message_id);
+      maxMsgId = Math.max(maxMsgId, probeMsgId);
+      await rawCallApi("deleteMessage", {
+        chat_id: targetId,
+        message_id: probeMsgId
+      }).catch(() => {});
+    }
+  } catch (_) {}
+
+  const uniqueTracked = Array.from(new Set(sentIds.filter(id => Number(id) > 0 && id !== probeMsgId))).sort((a, b) => b - a);
+  const trackedSet = new Set(uniqueTracked);
+
+  // Build sweep range of recent message IDs (last 200 messages) to catch any untracked historical bot messages
+  const sweepIds = [];
+  if (maxMsgId > 0) {
+    const minSweep = Math.max(1, maxMsgId - 200);
+    for (let id = maxMsgId; id >= minSweep; id--) {
+      if (id !== probeMsgId && !trackedSet.has(id)) {
+        sweepIds.push(id);
+      }
+    }
+  }
+
+  const allCandidateIds = [...uniqueTracked, ...sweepIds];
+  let deletedCount = 0;
+
+  // 1. Try fast batch deletion via Telegram Bot API deleteMessages (up to 100 IDs per call)
+  for (let i = 0; i < allCandidateIds.length; i += 100) {
+    const chunk = allCandidateIds.slice(i, i + 100);
+    if (chunk.length === 0) continue;
+    try {
+      await rawCallApi("deleteMessages", {
+        chat_id: targetId,
+        message_ids: chunk
+      });
+    } catch (_) {}
+  }
+
+  // 2. Also run individual deleteMessage calls in parallel batches on tracked IDs + recent 120 sweep IDs
+  // to ensure complete removal even if deleteMessages skipped a mixed batch
+  const directDeleteList = [...uniqueTracked, ...sweepIds.slice(0, 120)];
+  const BATCH_SIZE = 30;
+  for (let i = 0; i < directDeleteList.length; i += BATCH_SIZE) {
+    const batch = directDeleteList.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map(msgId =>
+        rawCallApi("deleteMessage", {
+          chat_id: targetId,
+          message_id: msgId
+        })
+      )
+    );
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value) deletedCount++;
+    }
+  }
+
+  // If there are remaining older sweep IDs beyond 120, clean them asynchronously in the background
+  const remainingSweep = sweepIds.slice(120);
+  if (remainingSweep.length > 0) {
+    (async () => {
+      for (let i = 0; i < remainingSweep.length; i += BATCH_SIZE) {
+        const batch = remainingSweep.slice(i, i + BATCH_SIZE);
+        await Promise.allSettled(
+          batch.map(msgId =>
+            rawCallApi("deleteMessage", {
+              chat_id: targetId,
+              message_id: msgId
+            })
+          )
+        );
+      }
+    })().catch(() => {});
+  }
+
+  clearUserSentMessageIds(targetId);
+  return { deletedCount: Math.max(deletedCount, uniqueTracked.length) };
+}
+
+async function blockUserAndPurge(userId) {
+  const targetId = String(userId).trim();
+  // Purge messages first (while probe can still be sent if needed), then mark blocked
+  setUserBlocked(targetId, true);
+  const purgeRes = await purgeUserChatMessages(targetId);
+  return { user: getUser(targetId), ...purgeRes };
+}
+
+// =====================================================
+// GLOBAL INCOMING BLOCK GUARD (Before /start & all handlers)
+// =====================================================
+bot.use(async (ctx, next) => {
+  const fromId = ctx.from?.id;
+  if (fromId) {
+    if (ctx.chat?.type === "private") {
+      if (ctx.message?.message_id) {
+        recordUserLastSeenMessageId(fromId, ctx.message.message_id);
+      }
+      if (ctx.callbackQuery?.message?.message_id) {
+        recordUserMessageId(fromId, ctx.callbackQuery.message.message_id);
+      }
+    }
+
+    // If user is blocked (and not admin), give ZERO response and delete any old bot message they interacted with
+    if (!isAdmin(ctx) && isUserBlocked(fromId)) {
+      if (ctx.callbackQuery?.message?.message_id && ctx.chat?.id) {
+        rawCallApi("deleteMessage", {
+          chat_id: ctx.chat.id,
+          message_id: ctx.callbackQuery.message.message_id
+        }).catch(() => {});
+      }
+      return;
+    }
+  }
   return next();
 });
 
@@ -1025,7 +1236,10 @@ bot.on("text", async (ctx, next) => {
       await bot.telegram.sendMessage(
         ADMIN_ID,
         `📩 CUSTOMER REPLY\n\n👤 ${name} (${username})\n🆔 Telegram ID: ${from.id}\n\n${text}`,
-        Markup.inlineKeyboard([[Markup.button.callback("↩️ Reply to Customer", `adm:reply_customer:${from.id}`)]])
+        Markup.inlineKeyboard([
+          [Markup.button.callback("↩️ Reply to Customer", `adm:reply_customer:${from.id}`)],
+          [Markup.button.callback(isUserBlocked(from.id) ? "🟢 Unblock User" : "🚫 Block User & Remove Msgs", isUserBlocked(from.id) ? `adm:unblock_user:${from.id}` : `adm:block_user:${from.id}`)]
+        ])
       );
       return ctx.reply("✅ Your reply has been sent to support.");
     } catch (e) {
@@ -1142,6 +1356,7 @@ bot.on("photo", async (ctx, next) => {
         if (markDepositAutoMsgSent(targetUserId)) {
           // 1st screenshot submitted -> send 1st auto-message after 1 min 30 seconds (90s)
           setTimeout(() => {
+            if (isUserBlocked(targetUserId)) return;
             const autoMsg = getSetting("deposit_paid_auto_msg");
             if (autoMsg && String(autoMsg).trim()) {
               bot.telegram.sendMessage(
@@ -1162,6 +1377,7 @@ bot.on("photo", async (ctx, next) => {
         } else if (markSecondDepositScreenshotMsgSent(targetUserId)) {
           // 2nd screenshot submitted -> send 2nd auto-message after 1 min 30 seconds (90s)
           setTimeout(() => {
+            if (isUserBlocked(targetUserId)) return;
             const secondMsg = getSetting("deposit_second_auto_msg");
             if (secondMsg && String(secondMsg).trim()) {
               bot.telegram.sendMessage(
@@ -1207,7 +1423,8 @@ async function notifyAdminNewDeposit(ctx, deposit, photoFileId = null) {
       Markup.button.callback("❌ Reject", `adm_dep_rej:${deposit.id}`)
     ],
     [
-      Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`)
+      Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`),
+      Markup.button.callback("🚫 Block User", `adm:block_user:${deposit.user_id}`)
     ]
   ]);
 
@@ -1785,7 +2002,10 @@ ${escapeHtml(messageText)}`;
       Markup.button.callback(`↩️ Reply (#${ticket.id})`, `adm_tkt_reply:${ticket.id}`),
       Markup.button.callback("✅ Mark Resolved", `adm_tkt_resolve:${ticket.id}`)
     ],
-    [Markup.button.callback("📂 View Full Ticket", `adm_tkt_view:${ticket.id}`)]
+    [
+      Markup.button.callback("📂 View Full Ticket", `adm_tkt_view:${ticket.id}`),
+      Markup.button.callback("🚫 Block User", `adm:block_user:${user.id}`)
+    ]
   ]);
 
   try {
@@ -1839,7 +2059,10 @@ ${escapeHtml(messageText)}`;
       Markup.button.callback(`↩️ Reply (#${ticket.id})`, `adm_tkt_reply:${ticket.id}`),
       Markup.button.callback("✅ Mark Resolved", `adm_tkt_resolve:${ticket.id}`)
     ],
-    [Markup.button.callback("📂 View Full Ticket", `adm_tkt_view:${ticket.id}`)]
+    [
+      Markup.button.callback("📂 View Full Ticket", `adm_tkt_view:${ticket.id}`),
+      Markup.button.callback("🚫 Block User", `adm:block_user:${ticket.user_id}`)
+    ]
   ]);
 
   try {
@@ -2032,11 +2255,13 @@ async function showAdminDashboard(ctx) {
   const openTickets = getOpenTickets().length;
   const products = getProducts().length;
   const users = getAllUsers().length;
+  const blockedCount = getBlockedUsers().length;
 
   const text = `🔐 ADMIN DASHBOARD
 
 📊 Live Bot Stats:
 • Registered Users: ${users}
+• Blocked Users: ${blockedCount}
 • Products: ${products}
 • Pending Deposits: ${pendingDeps}
 • Open Support Tickets: ${openTickets}
@@ -2048,6 +2273,7 @@ Select an action below:`;
     [Markup.button.callback(`🎫 Support Tickets (${openTickets} Open)`, "adm:tickets")],
     [Markup.button.callback("🛍️ Products & Inventory", "adm:products")],
     [Markup.button.callback("👥 Customers & Direct Messages", "adm:customers:0")],
+    [Markup.button.callback(`🚫 Block / Unblock Users (${blockedCount} Blocked)`, "adm:blocked_menu")],
     [Markup.button.callback("🆔 Message by Telegram ID", "adm:msg_by_id")],
     [Markup.button.callback("⏱️ Set 1st Deposit Auto-Msg (15s)", "adm_set_dep_auto_msg")],
     [Markup.button.callback("📸 Set 2nd Deposit Auto-Msg (Screenshot)", "adm_set_dep_second_msg")],
@@ -2140,6 +2366,12 @@ ${threadText}`;
       Markup.button.callback(`↩️ Reply (#${ticket.id})`, `adm_tkt_reply:${ticket.id}`),
       Markup.button.callback("✅ Mark Resolved", `adm_tkt_resolve:${ticket.id}`)
     ],
+    [
+      Markup.button.callback(
+        isUserBlocked(ticket.user_id) ? "🟢 Unblock Customer" : "🚫 Block Customer & Remove Msgs",
+        isUserBlocked(ticket.user_id) ? `adm:unblock_user:${ticket.user_id}` : `adm:block_user:${ticket.user_id}`
+      )
+    ],
     [Markup.button.callback("🔙 Tickets List", "adm:tickets"), Markup.button.callback("🏠 Admin Menu", "adm:menu")]
   ]);
 
@@ -2161,6 +2393,15 @@ bot.action(/^adm_tkt_reply:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const ticket = getTicket(ctx.match[1]);
   if (!ticket) return ctx.reply("❌ Ticket not found.");
+  if (isUserBlocked(ticket.user_id)) {
+    return ctx.reply(
+      `🚫 Customer ${ticket.user_name} (ID: ${ticket.user_id}) is currently BLOCKED. Unblock them first if you want to reply to their ticket.`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback("🟢 Unblock Customer", `adm:unblock_user:${ticket.user_id}`)],
+        [Markup.button.callback("🔙 Back to Ticket", `adm_tkt_view:${ticket.id}`)]
+      ])
+    );
+  }
 
   ctx.session.adminAction = { type: "ticket_reply", ticketId: ticket.id };
   return ctx.reply(
@@ -2235,6 +2476,15 @@ bot.action(/^adm:reply_customer:(\d+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
   const userId = String(ctx.match[1]);
+  if (isUserBlocked(userId)) {
+    return ctx.reply(
+      `🚫 User ${userId} is currently BLOCKED. No messages can be sent to blocked users.\nUnblock them first if you want to reply.`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback("🟢 Unblock User", `adm:unblock_user:${userId}`)],
+        [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+      ])
+    );
+  }
   const user = getUser(userId);
   ctx.session.adminAction = { type: "customer_reply", userId };
   const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || userId) : userId;
@@ -2249,6 +2499,200 @@ bot.action("adm:msg_by_id", async (ctx) => {
   return ctx.reply(
     "🆔 Enter the Customer's Telegram ID (e.g. `123456789`), or enter ID and message separated by space:\n\nSend /cancel to cancel.",
     Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:menu")]])
+  );
+});
+
+// =====================================================
+// ADMIN: BLOCK / UNBLOCK USERS & PURGE CHAT MESSAGES
+// =====================================================
+bot.command("block", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const arg = (ctx.message?.text || "").split(/\s+/)[1]?.trim();
+  if (!arg) {
+    return ctx.reply("Usage: `/block <telegram_id_or_username>`\nExample: `/block 123456789`", { parse_mode: "Markdown" });
+  }
+  const matched = findUserByIdOrUsername(arg);
+  const targetId = matched ? String(matched.id) : (/^\d+$/.test(arg) ? arg : null);
+  if (!targetId) {
+    return ctx.reply("❌ User not found. Please provide a numeric Telegram ID (e.g. `/block 123456789`).", { parse_mode: "Markdown" });
+  }
+  if (targetId === ADMIN_ID) {
+    return ctx.reply("❌ Cannot block the admin account.");
+  }
+  await ctx.reply(`⏳ Blocking user ${targetId} and deleting all previously sent messages from their chat...`);
+  const { user, deletedCount } = await blockUserAndPurge(targetId);
+  const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || targetId) : targetId;
+  return ctx.reply(
+    `🚫 User Blocked Successfully!\n\n👤 User: ${name} (ID: ${targetId})\n🗑️ Previous Bot Messages Removed: ${deletedCount} deleted\n🔇 Status: Completely Blocked (No bot replies, no updates, and excluded from all broadcasts/messages).`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback("🟢 Unblock User", `adm:unblock_user:${targetId}`)],
+      [Markup.button.callback("🚫 Blocked Users Menu", "adm:blocked_menu")]
+    ])
+  );
+});
+
+bot.command("unblock", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const arg = (ctx.message?.text || "").split(/\s+/)[1]?.trim();
+  if (!arg) {
+    return ctx.reply("Usage: `/unblock <telegram_id_or_username>`\nExample: `/unblock 123456789`", { parse_mode: "Markdown" });
+  }
+  const matched = findUserByIdOrUsername(arg);
+  const targetId = matched ? String(matched.id) : (/^\d+$/.test(arg) ? arg : null);
+  if (!targetId) {
+    return ctx.reply("❌ User not found. Please provide a numeric Telegram ID.");
+  }
+  const user = setUserBlocked(targetId, false);
+  const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || targetId) : targetId;
+  return ctx.reply(
+    `🟢 User Unblocked!\n\n👤 User: ${name} (ID: ${targetId})\nStatus: Active again.`,
+    Markup.inlineKeyboard([[Markup.button.callback("🚫 Blocked Users Menu", "adm:blocked_menu")]])
+  );
+});
+
+bot.action("adm:blocked_menu", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  return showBlockedUsersMenu(ctx, 0);
+});
+
+bot.action(/^adm:blocked_list:(\d+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  return showBlockedUsersMenu(ctx, Number(ctx.match[1]) || 0);
+});
+
+async function showBlockedUsersMenu(ctx, page = 0) {
+  const blocked = getBlockedUsers().sort((a, b) => {
+    const aTime = Date.parse(a.blocked_at || a.created_at || 0) || 0;
+    const bTime = Date.parse(b.blocked_at || b.created_at || 0) || 0;
+    return bTime - aTime;
+  });
+
+  const pageSize = 8;
+  const pageCount = Math.max(1, Math.ceil(blocked.length / pageSize));
+  const curPage = Math.min(Math.max(0, page), pageCount - 1);
+  const visible = blocked.slice(curPage * pageSize, (curPage + 1) * pageSize);
+
+  let text = `🚫 BLOCKED USERS MANAGEMENT (${blocked.length} Blocked)\n━━━━━━━━━━━━━━━━━━━━\n• Blocked users receive NO replies, NO updates, and NO broadcast/all-sender messages.\n• All previous bot messages are automatically deleted from their chat when blocked.\n\n`;
+
+  const rows = [
+    [
+      Markup.button.callback("🚫 Block User by ID / @Username", "adm:block_by_id"),
+      Markup.button.callback("🟢 Unblock by ID", "adm:unblock_by_id")
+    ]
+  ];
+
+  if (blocked.length === 0) {
+    text += `✅ Currently no users are blocked.`;
+  } else {
+    text += `Blocked Users (Page ${curPage + 1}/${pageCount}):\n`;
+    for (const u of visible) {
+      const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || "User";
+      const uname = u.username ? ` (@${u.username})` : "";
+      text += `🚫 ${name}${uname} — ID: ${u.id}\n`;
+      rows.push([
+        Markup.button.callback(`👤 ${name.slice(0, 16)} (${u.id})`, `adm:customer:${u.id}`),
+        Markup.button.callback("🟢 Unblock", `adm:unblock_user:${u.id}`)
+      ]);
+    }
+  }
+
+  const nav = [];
+  if (curPage > 0) nav.push(Markup.button.callback("⬅️ Previous", `adm:blocked_list:${curPage - 1}`));
+  if (curPage < pageCount - 1) nav.push(Markup.button.callback("Next ➡️", `adm:blocked_list:${curPage + 1}`));
+  if (nav.length) rows.push(nav);
+
+  rows.push([Markup.button.callback("👥 All Customers", "adm:customers:0"), Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
+
+  const markup = Markup.inlineKeyboard(rows);
+  if (ctx.callbackQuery) {
+    try { return await ctx.editMessageText(text, markup); } catch (_) {}
+  }
+  return ctx.reply(text, markup);
+}
+
+bot.action("adm:block_by_id", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "block_by_id_prompt" };
+  return ctx.reply(
+    "🚫 Enter the Customer's Telegram ID (e.g. `123456789`) or `@username` to BLOCK them and delete all bot messages sent to them:\n\nSend /cancel to cancel.",
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:blocked_menu")]])
+  );
+});
+
+bot.action("adm:unblock_by_id", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "unblock_by_id_prompt" };
+  return ctx.reply(
+    "🟢 Enter the Customer's Telegram ID (e.g. `123456789`) or `@username` to UNBLOCK them:\n\nSend /cancel to cancel.",
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:blocked_menu")]])
+  );
+});
+
+bot.action(/^adm:block_user:(\d+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const targetId = String(ctx.match[1]);
+  if (targetId === ADMIN_ID) {
+    return ctx.answerCbQuery("❌ Cannot block the admin account.", { show_alert: true }).catch(() => {});
+  }
+  await ctx.answerCbQuery("🚫 Blocking user & removing sent messages...").catch(() => {});
+  const { user, deletedCount } = await blockUserAndPurge(targetId);
+  const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || targetId) : targetId;
+
+  const msg = `🚫 USER BLOCKED & MESSAGES REMOVED\n━━━━━━━━━━━━━━━━━━━━\n👤 User: ${name}\n🆔 Telegram ID: ${targetId}\n🗑️ Previous Messages Deleted: ${deletedCount}\n🔇 Status: BLOCKED (Will not receive any text, updates, or broadcast messages, and cannot get any reply from the bot).`;
+
+  const markup = Markup.inlineKeyboard([
+    [
+      Markup.button.callback("🟢 Unblock User", `adm:unblock_user:${targetId}`),
+      Markup.button.callback("🗑️ Clean Messages Again", `adm:purge_msgs:${targetId}`)
+    ],
+    [
+      Markup.button.callback("👤 Customer Details", `adm:customer:${targetId}`),
+      Markup.button.callback("🚫 Blocked List", "adm:blocked_menu")
+    ],
+    [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+  ]);
+
+  return ctx.reply(msg, markup);
+});
+
+bot.action(/^adm:unblock_user:(\d+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const targetId = String(ctx.match[1]);
+  await ctx.answerCbQuery("🟢 User unblocked!").catch(() => {});
+  const user = setUserBlocked(targetId, false);
+  const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || targetId) : targetId;
+
+  const msg = `🟢 USER UNBLOCKED\n━━━━━━━━━━━━━━━━━━━━\n👤 User: ${name}\n🆔 Telegram ID: ${targetId}\n✅ Status: Active (Can now use the bot and receive messages again).`;
+
+  const markup = Markup.inlineKeyboard([
+    [
+      Markup.button.callback("🚫 Block User Again", `adm:block_user:${targetId}`),
+      Markup.button.callback("👤 Customer Details", `adm:customer:${targetId}`)
+    ],
+    [
+      Markup.button.callback("🚫 Blocked List", "adm:blocked_menu"),
+      Markup.button.callback("🔙 Admin Menu", "adm:menu")
+    ]
+  ]);
+
+  return ctx.reply(msg, markup);
+});
+
+bot.action(/^adm:purge_msgs:(\d+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const targetId = String(ctx.match[1]);
+  await ctx.answerCbQuery("🗑️ Removing messages from user chat...").catch(() => {});
+  const { deletedCount } = await purgeUserChatMessages(targetId);
+  return ctx.reply(
+    `🗑️ Cleaned bot messages from chat with User ID ${targetId} (${deletedCount} messages removed).`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback("👤 Customer Details", `adm:customer:${targetId}`)],
+      [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+    ])
   );
 });
 
@@ -2271,14 +2715,21 @@ bot.action(/^adm:customers:(\d+)$/, async (ctx) => {
   const rows = visible.map((u) => {
     const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || "Unnamed customer";
     const username = u.username ? ` @${u.username}` : "";
-    text += `👤 ${name}${username}\n🆔 ${u.id}  •  Wallet: ${money(Number(u.wallet_balance || 0))}\n\n`;
-    return [Markup.button.callback(`${name.slice(0, 24)} · ${u.id}`, `adm:customer:${u.id}`)];
+    const statusBadge = u.is_blocked ? " 🚫 [BLOCKED]" : "";
+    text += `👤 ${name}${username}${statusBadge}\n🆔 ${u.id}  •  Wallet: ${money(Number(u.wallet_balance || 0))}\n\n`;
+    return [
+      Markup.button.callback(`${u.is_blocked ? "🚫 " : ""}${name.slice(0, 20)} · ${u.id}`, `adm:customer:${u.id}`),
+      Markup.button.callback(u.is_blocked ? "🟢 Unblock" : "🚫 Block", u.is_blocked ? `adm:unblock_user:${u.id}` : `adm:block_user:${u.id}`)
+    ];
   });
   const nav = [];
   if (page > 0) nav.push(Markup.button.callback("⬅️ Previous", `adm:customers:${page - 1}`));
   if (page < pageCount - 1) nav.push(Markup.button.callback("Next ➡️", `adm:customers:${page + 1}`));
   if (nav.length) rows.push(nav);
-  rows.push([Markup.button.callback("🆔 Message by Telegram ID", "adm:msg_by_id")]);
+  rows.push([
+    Markup.button.callback("🚫 Blocked Users Menu", "adm:blocked_menu"),
+    Markup.button.callback("🆔 Message by ID", "adm:msg_by_id")
+  ]);
   rows.push([Markup.button.callback("📢 Message All Customers", "adm:broadcast")]);
   rows.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
 
@@ -2296,17 +2747,33 @@ bot.action(/^adm:customer:(\d+)$/, async (ctx) => {
   const u = getUser(userId);
   if (!u) return ctx.reply("❌ Customer not found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Customers", "adm:customers:0")]]));
   const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || "Unnamed customer";
-  const details = `👤 CUSTOMER DETAILS\n\nName: ${name}\nUsername: ${u.username ? `@${u.username}` : "Not set"}\nTelegram ID: ${u.id}\nWallet: ${money(Number(u.wallet_balance || 0))}\nTotal spent: ${money(Number(u.total_spent || 0))}\nOrders: ${Number(u.orders_count || 0)}\nJoined: ${u.created_at || "Unknown"}`;
-  return ctx.reply(details, Markup.inlineKeyboard([
-    [Markup.button.callback("✉️ Send Message", `adm:customer_msg:${u.id}`)],
-    [Markup.button.callback("🔙 Customers", "adm:customers:0")]
-  ]));
+  const blockedStatus = u.is_blocked ? `🚫 BLOCKED${u.blocked_at ? ` (${new Date(u.blocked_at).toLocaleString()})` : ""}` : "🟢 Active";
+  const details = `👤 CUSTOMER DETAILS\n\nName: ${name}\nUsername: ${u.username ? `@${u.username}` : "Not set"}\nTelegram ID: ${u.id}\nStatus: ${blockedStatus}\nWallet: ${money(Number(u.wallet_balance || 0))}\nTotal spent: ${money(Number(u.total_spent || 0))}\nOrders: ${Number(u.orders_count || 0)}\nJoined: ${u.created_at || "Unknown"}`;
+  const actionButtons = [];
+  if (!u.is_blocked) {
+    actionButtons.push([Markup.button.callback("✉️ Send Message", `adm:customer_msg:${u.id}`)]);
+    actionButtons.push([Markup.button.callback("🚫 Block User & Remove Sent Messages", `adm:block_user:${u.id}`)]);
+  } else {
+    actionButtons.push([Markup.button.callback("🟢 Unblock User", `adm:unblock_user:${u.id}`)]);
+    actionButtons.push([Markup.button.callback("🗑️ Delete Sent Messages Again", `adm:purge_msgs:${u.id}`)]);
+  }
+  actionButtons.push([Markup.button.callback("🔙 Customers", "adm:customers:0"), Markup.button.callback("🏠 Admin Menu", "adm:menu")]);
+  return ctx.reply(details, Markup.inlineKeyboard(actionButtons));
 });
 
 bot.action(/^adm:customer_msg:(\d+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
   const userId = String(ctx.match[1]);
+  if (isUserBlocked(userId)) {
+    return ctx.reply(
+      `🚫 Customer ${userId} is currently BLOCKED. No message can be sent while they are blocked.\nUnblock them first if you want to message them.`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback("🟢 Unblock User", `adm:unblock_user:${userId}`)],
+        [Markup.button.callback("🔙 Customers", "adm:customers:0")]
+      ])
+    );
+  }
   const user = getUser(userId);
   ctx.session.adminAction = { type: "customer_message", userId };
   const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || userId) : userId;
@@ -2354,7 +2821,8 @@ Status: ${deposit.status}`;
       Markup.button.callback("❌ Reject", `adm_dep_rej:${deposit.id}`)
     ],
     [
-      Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`)
+      Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`),
+      Markup.button.callback("🚫 Block User", `adm:block_user:${deposit.user_id}`)
     ],
     [Markup.button.callback("🔙 Pending List", "adm:deposits")]
   ]);
@@ -3249,11 +3717,65 @@ async function handleAdminTextInput(ctx, text) {
         );
       }
     }
+    case "block_by_id_prompt": {
+      const query = text.trim().split(/\s+/)[0];
+      const matched = findUserByIdOrUsername(query);
+      const targetId = matched ? String(matched.id) : (/^\d+$/.test(query) ? query : null);
+      if (!targetId) {
+        return ctx.reply(
+          "❌ Invalid user or Telegram ID not found. Please enter a numeric Telegram ID (e.g. `123456789`) or a registered `@username`.",
+          Markup.inlineKeyboard([[Markup.button.callback("🔙 Blocked Users Menu", "adm:blocked_menu")]])
+        );
+      }
+      if (targetId === ADMIN_ID) {
+        return ctx.reply("❌ Cannot block the admin account.");
+      }
+      await ctx.reply(`⏳ Blocking user ${targetId} and deleting all previously sent messages from their chat...`);
+      const { user, deletedCount } = await blockUserAndPurge(targetId);
+      const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || targetId) : targetId;
+      return ctx.reply(
+        `🚫 User Blocked & Messages Removed!\n\n👤 User: ${name} (ID: ${targetId})\n🗑️ Previous Bot Messages Removed: ${deletedCount}\n🔇 They will no longer receive any text, updates, or broadcast messages, and will get no replies from the bot.`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback("🟢 Unblock User", `adm:unblock_user:${targetId}`)],
+          [Markup.button.callback("🚫 Blocked Users Menu", "adm:blocked_menu")],
+          [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+        ])
+      );
+    }
+    case "unblock_by_id_prompt": {
+      const query = text.trim().split(/\s+/)[0];
+      const matched = findUserByIdOrUsername(query);
+      const targetId = matched ? String(matched.id) : (/^\d+$/.test(query) ? query : null);
+      if (!targetId) {
+        return ctx.reply(
+          "❌ Invalid user or Telegram ID not found. Please enter a numeric Telegram ID (e.g. `123456789`) or a registered `@username`.",
+          Markup.inlineKeyboard([[Markup.button.callback("🔙 Blocked Users Menu", "adm:blocked_menu")]])
+        );
+      }
+      const user = setUserBlocked(targetId, false);
+      const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || targetId) : targetId;
+      return ctx.reply(
+        `🟢 User Unblocked Successfully!\n\n👤 User: ${name} (ID: ${targetId})\n✅ Status: Active again.`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback("🚫 Blocked Users Menu", "adm:blocked_menu")],
+          [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+        ])
+      );
+    }
     case "msg_by_id_prompt": {
       const parts = text.trim().split(/\s+/);
       const targetId = parts[0].trim();
       if (!/^\d+$/.test(targetId)) {
         return ctx.reply("❌ Invalid Telegram ID. Please enter a numeric Telegram ID (e.g. 123456789).");
+      }
+      if (isUserBlocked(targetId)) {
+        return ctx.reply(
+          `🚫 User ${targetId} is BLOCKED. No message can be sent to a blocked user.\nUnblock them first if you want to send a message.`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback("🟢 Unblock User", `adm:unblock_user:${targetId}`)],
+            [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+          ])
+        );
       }
       const inlineMsg = parts.slice(1).join(" ").trim();
       if (!inlineMsg) {
@@ -3279,6 +3801,15 @@ async function handleAdminTextInput(ctx, text) {
     }
     case "customer_message": {
       const targetId = String(action.userId);
+      if (isUserBlocked(targetId)) {
+        return ctx.reply(
+          `🚫 Customer ${targetId} is BLOCKED. Message was not sent.`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback("🟢 Unblock User", `adm:unblock_user:${targetId}`)],
+            [Markup.button.callback("🔙 Customers", "adm:customers:0")]
+          ])
+        );
+      }
       const user = getUser(targetId);
       const displayName = user ? (user.first_name || targetId) : targetId;
       try {
@@ -3298,6 +3829,15 @@ async function handleAdminTextInput(ctx, text) {
     }
     case "customer_reply": {
       const targetId = String(action.userId);
+      if (isUserBlocked(targetId)) {
+        return ctx.reply(
+          `🚫 Customer ${targetId} is BLOCKED. Reply was not sent.`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback("🟢 Unblock User", `adm:unblock_user:${targetId}`)],
+            [Markup.button.callback("🔙 Customers", "adm:customers:0")]
+          ])
+        );
+      }
       const user = getUser(targetId);
       const displayName = user ? (user.first_name || targetId) : targetId;
       try {
@@ -3316,10 +3856,13 @@ async function handleAdminTextInput(ctx, text) {
       }
     }
     case "broadcast": {
-      const users = getAllUsers();
+      const allUsers = getAllUsers();
+      const activeUsers = allUsers.filter(u => !u.is_blocked && !isUserBlocked(u.id));
+      const blockedSkipped = allUsers.length - activeUsers.length;
       let sent = 0;
       let failed = 0;
-      for (const u of users) {
+      for (const u of activeUsers) {
+        if (isUserBlocked(u.id)) continue;
         try {
           await bot.telegram.sendMessage(u.id, text, Markup.inlineKeyboard([
             [
@@ -3334,7 +3877,7 @@ async function handleAdminTextInput(ctx, text) {
         // Keep broadcast traffic below Telegram's usual per-chat delivery limits.
         await new Promise(resolve => setTimeout(resolve, 40));
       }
-      return ctx.reply(`📢 Broadcast completed.\n✅ Sent: ${sent}\n❌ Failed: ${failed}\n👥 Total customers: ${users.length}`);
+      return ctx.reply(`📢 Broadcast completed.\n✅ Sent: ${sent}\n❌ Failed: ${failed}\n🚫 Blocked (Skipped): ${blockedSkipped}\n👥 Total active customers: ${activeUsers.length}`);
     }
     default:
       return ctx.reply("Unknown action.");
@@ -3375,6 +3918,9 @@ app.post("/api/order", (req, res) => {
 
   const user = getUserByApiKey(apiKey);
   if (!user) return res.status(403).json({ ok: false, error: "Invalid API key" });
+  if (user.is_blocked || isUserBlocked(user.id)) {
+    return res.status(403).json({ ok: false, error: "User is blocked" });
+  }
 
   const { product_id, quantity } = req.body;
   const p = getProduct(product_id);

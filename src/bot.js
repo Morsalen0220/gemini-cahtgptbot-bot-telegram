@@ -224,7 +224,7 @@ function welcomeText(user) {
 
 ⚡️ Instant Automated Delivery
 ✅ Fresh & Guaranteed Accounts / Coupons
-👛 Pay with Wallet (USDT BEP20 / Polygon)
+👛 Pay with Wallet (Binance Pay / USDT BEP20 / Polygon)
 💬 24/7 Dedicated Support
 
 Tap 🛍️ Buy below to explore available products:`;
@@ -721,7 +721,7 @@ bot.action("order:execute_pay", async (ctx) => {
 });
 
 // =====================================================
-// DEPOSIT FLOW (USDT BEP20 / POLYGON)
+// DEPOSIT FLOW (BINANCE PAY / USDT BEP20 / POLYGON)
 // =====================================================
 bot.action(/^deposit:start(?::([\d.]+))?$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
@@ -732,10 +732,12 @@ bot.action(/^deposit:start(?::([\d.]+))?$/, async (ctx) => {
   const text = `💳 <b>SELECT DEPOSIT METHOD</b>
 ━━━━━━━━━━━━━━━━━━━
 Please choose your preferred deposit gateway:
+• <b>Binance Pay:</b> Binance ID / Pay ID (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)
 • <b>USDT (BEP20):</b> BNB Smart Chain (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)
 • <b>USDT (Polygon):</b> Polygon / POL (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)`;
 
   const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("🟡 Binance Pay (Binance ID)", `deposit:binance:${suggestedAmount}`)],
     [Markup.button.callback("🟡 USDT (BEP20 / BSC)", `deposit:bep20:${suggestedAmount}`)],
     [Markup.button.callback("🟣 USDT (Polygon / POL)", `deposit:polygon:${suggestedAmount}`)],
     [Markup.button.callback("🔙 Back to Wallet", "menu:wallet")]
@@ -747,6 +749,13 @@ Please choose your preferred deposit gateway:
     } catch (e) {}
   }
   await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+});
+
+// Binance Pay deposit
+bot.action(/^deposit:binance(?::([\d.]+))?$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const amount = ctx.match[1] ? Number(ctx.match[1]) : 1.0;
+  await showBinanceDepositInstructions(ctx, amount);
 });
 
 // USDT BEP20 deposit
@@ -769,6 +778,68 @@ bot.action(/^deposit:crypto(?::([\d.]+))?$/, async (ctx) => {
   const amount = ctx.match[1] ? Number(ctx.match[1]) : 1.0;
   await showBep20DepositInstructions(ctx, amount);
 });
+
+async function showBinanceDepositInstructions(ctx, amount) {
+  const settings = getAllSettings();
+  const user = getOrCreateUser(ctx.from);
+  const binancePayId = settings.binance_pay_id || process.env.BINANCE_PAY_ID || "123456789";
+  const minCrypto = Number(settings.min_crypto_deposit || 1.00);
+  const finalAmount = Math.max(minCrypto, Number(amount) || minCrypto);
+
+  const deposit = createDeposit({
+    user_id: user.id,
+    user_name: user.username ? `@${user.username}` : user.first_name,
+    amount: finalAmount,
+    method: "BINANCE_PAY",
+    address: binancePayId
+  });
+
+  ctx.session.activeDepositId = deposit.id;
+
+  const defaultDesc = `⚠️ <b>Instructions:</b>
+1. Open your <b>Binance App</b>.
+2. Tap <b>Pay</b> (or scan/tap Send).
+3. Select <b>Binance ID / Pay ID</b>.
+4. Enter Pay ID: <code>${binancePayId}</code>
+5. Enter Amount: <b>$${finalAmount.toFixed(2)} USDT</b> (Min: $${minCrypto.toFixed(2)}) and complete transfer.
+6. After payment, tap <b>"✅ I've Paid"</b> below to submit your payment proof / Order ID or screenshot.`;
+
+  const desc = settings.binance_deposit_desc && String(settings.binance_deposit_desc).trim()
+    ? String(settings.binance_deposit_desc).trim()
+    : defaultDesc;
+
+  const text = `🟡 <b>BINANCE PAY (BINANCE ID) DEPOSIT</b>
+━━━━━━━━━━━━━━━━━━━━
+💳 <b>Method:</b> Binance Pay
+💵 <b>Minimum Deposit:</b> $${minCrypto.toFixed(2)} USDT
+
+📋 <b>Binance ID / Pay ID (Tap to copy):</b>
+<code>${binancePayId}</code>
+
+━━━━━━━━━━━━━━━━━━━━
+${desc}`;
+
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("✅ I've Paid", `deposit_paid:${deposit.id}`)],
+    [Markup.button.callback("🟡 USDT (BEP20)", `deposit:bep20:${finalAmount}`), Markup.button.callback("🟣 USDT (Polygon)", `deposit:polygon:${finalAmount}`)],
+    [Markup.button.callback("🔙 Choose Method", "deposit:start"), Markup.button.callback("❌ Cancel", "menu:wallet")]
+  ]);
+
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
+    } catch (e) {
+      try {
+        return await ctx.editMessageText(text, { ...buttons });
+      } catch (e2) {}
+    }
+  }
+  try {
+    await ctx.reply(text, { parse_mode: "HTML", ...buttons });
+  } catch (e) {
+    await ctx.reply(text, { ...buttons });
+  }
+}
 
 async function showBep20DepositInstructions(ctx, amount) {
   const settings = getAllSettings();
@@ -805,7 +876,7 @@ ${desc}`;
 
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback("✅ I've Paid", `deposit_paid:${deposit.id}`)],
-    [Markup.button.callback("🟣 Switch to Polygon", `deposit:polygon:${finalAmount}`)],
+    [Markup.button.callback("🟡 Binance Pay", `deposit:binance:${finalAmount}`), Markup.button.callback("🟣 Switch to Polygon", `deposit:polygon:${finalAmount}`)],
     [Markup.button.callback("🔙 Choose Method", "deposit:start"), Markup.button.callback("❌ Cancel", "menu:wallet")]
   ]);
 
@@ -857,7 +928,7 @@ async function showPolygonDepositInstructions(ctx, amount) {
 
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback("✅ I've Paid", `deposit_paid:${deposit.id}`)],
-    [Markup.button.callback("🟡 Switch to BEP20", `deposit:bep20:${finalAmount}`)],
+    [Markup.button.callback("🟡 Binance Pay", `deposit:binance:${finalAmount}`), Markup.button.callback("🟡 Switch to BEP20", `deposit:bep20:${finalAmount}`)],
     [Markup.button.callback("🔙 Choose Method", "deposit:start"), Markup.button.callback("❌ Cancel", "menu:wallet")]
   ]);
 
@@ -990,7 +1061,7 @@ bot.on("text", async (ctx, next) => {
       deposit.updated_at = new Date().toISOString();
       await notifyAdminNewDeposit(ctx, deposit);
       return ctx.reply(
-        `✅ Thank you! Your payment proof for Deposit ${depositId} has been submitted.\n\nOur team is verifying the on-chain arrival and your balance will be credited shortly!`,
+        `✅ Thank you! Your payment proof for Deposit ${depositId} has been submitted.\n\nOur team is verifying the payment and your balance will be credited shortly!`,
         Markup.inlineKeyboard([[Markup.button.callback("👛 View Wallet", "menu:wallet")]])
       );
     }
@@ -2035,6 +2106,8 @@ bot.action("adm:settings", async (ctx) => {
 • Channel Link: ${s.channel_link || "Not Set"}
 • Group ID: ${s.group_id || "Not Set"}
 • Group Link: ${s.group_link || "Not Set"}
+• Binance Pay ID: ${s.binance_pay_id || "Not Set"}
+• Binance Deposit Description: ${s.binance_deposit_desc ? "✅ Custom" : "Default"}
 • USDT BEP20 Address: ${s.bep20_usdt_address}
 • USDT Polygon Address: ${s.polygon_usdt_address || s.bep20_usdt_address}
 • BEP20 Deposit Description: ${s.bep20_deposit_desc ? "✅ Custom" : "Default"}
@@ -2056,6 +2129,7 @@ bot.action("adm:settings", async (ctx) => {
       Markup.button.callback("🚀 Test Sale Broadcast", "adm_test_sale_broadcast")
     ],
     [Markup.button.callback("✏️ Edit Channel", "adm_set_chan"), Markup.button.callback("✏️ Edit Group", "adm_set_grp")],
+    [Markup.button.callback("🟡 Edit Binance Pay ID", "adm_set_binance_pay"), Markup.button.callback("📝 Edit Binance Desc", "adm_set_binance_desc")],
     [Markup.button.callback("✏️ Edit BEP20 USDT", "adm_set_bep20"), Markup.button.callback("✏️ Edit Polygon USDT", "adm_set_polygon")],
     [Markup.button.callback("📝 Edit BEP20 Description", "adm_set_bep20_desc")],
     [Markup.button.callback("✏️ Edit Support", "adm_set_support"), Markup.button.callback("✏️ Edit Min Crypto Dep", "adm_set_min_crypto")],
@@ -2134,6 +2208,30 @@ bot.action("adm_set_grp", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   ctx.session.adminAction = { type: "set_group" };
   await ctx.reply("Enter Group ID and Link separated by space (e.g. `@mygroup https://t.me/mygroup`):");
+});
+
+bot.action("adm_set_binance_pay", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "set_binance_pay_id" };
+  await ctx.reply(
+    "🟡 Enter new Binance Pay ID (Binance ID / UID e.g. 123456789):",
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:settings")]])
+  );
+});
+
+bot.action("adm_set_binance_desc", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "set_binance_desc" };
+  const current = getSetting("binance_deposit_desc") || "Default instructions";
+  await ctx.reply(
+    `📝 <b>Current Binance Pay Deposit Description:</b>\n\n${current}\n\n✍️ Send the new description text below (HTML supported e.g. <b>bold</b>).\n\n💡 Send <code>/default</code> to reset to default instructions, or <code>/cancel</code> to cancel:`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:settings")]])
+    }
+  );
 });
 
 bot.action("adm_set_bep20", async (ctx) => {
@@ -2378,6 +2476,49 @@ async function handleAdminTextInput(ctx, text) {
       setSetting("group_id", gId);
       setSetting("group_link", gLink);
       return ctx.reply(`✅ Group successfully set:\n• ID: ${gId}\n• Link: ${gLink}`);
+    }
+    case "set_binance_pay_id": {
+      setSetting("binance_pay_id", text.trim());
+      return ctx.reply(
+        `✅ Binance Pay ID updated to:\n<code>${text.trim()}</code>`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([[Markup.button.callback("⚙️ Back to Settings", "adm:settings")]])
+        }
+      );
+    }
+    case "set_binance_desc": {
+      if (text.trim() === "/default") {
+        setSetting("binance_deposit_desc", "");
+        return ctx.reply(
+          "✅ Binance Pay Deposit Description reset to default!",
+          Markup.inlineKeyboard([
+            [Markup.button.callback("⚙️ Settings", "adm:settings")],
+            [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+          ])
+        );
+      }
+      setSetting("binance_deposit_desc", text.trim());
+      try {
+        return await ctx.reply(
+          `✅ <b>Binance Pay Deposit Description updated successfully!</b>\n\n<b>Preview:</b>\n${text.trim()}`,
+          {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback("⚙️ Settings", "adm:settings")],
+              [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+            ])
+          }
+        );
+      } catch (err) {
+        return await ctx.reply(
+          `✅ Binance Pay Deposit Description updated successfully!\n\nPreview:\n${text.trim()}`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback("⚙️ Settings", "adm:settings")],
+            [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+          ])
+        );
+      }
     }
     case "set_bep20_addr": {
       setSetting("bep20_usdt_address", text.trim());

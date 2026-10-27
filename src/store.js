@@ -20,10 +20,12 @@ const defaultSettings = {
   group_id: process.env.FORCE_GROUP_ID || "",
   group_link: process.env.FORCE_GROUP_LINK || "https://t.me/",
   force_join_enabled: false,
-  bep20_usdt_address: "0xC3fC8C91A5B26C71DcD0aC1F34944FB298bCeBbF",
-  polygon_usdt_address: "0x58F0C60b37E5c84C4C7fE4a553F1fCe6405F412b",
+  bep20_usdt_address: process.env.BEP20_USDT_ADDRESS || "0xC3fC8C91A5B26C71DcD0aC1F34944FB298bCeBbF",
+  polygon_usdt_address: process.env.POLYGON_USDT_ADDRESS || "0x58F0C60b37E5c84C4C7fE4a553F1fCe6405F412b",
+  binance_pay_id: process.env.BINANCE_PAY_ID || "",
   bep20_deposit_desc: "",
-  support_username: "@aibuyshop_support",
+  binance_deposit_desc: "",
+  support_username: process.env.SUPPORT_USERNAME || "@aibuyshop_support",
   referral_bonus_percent: 5,
   min_crypto_deposit: 1.00,
   fake_sales_broadcast_enabled: true,
@@ -229,6 +231,9 @@ function normalizeDb(raw) {
   } else {
     for (const [k, v] of Object.entries(defaultSettings)) {
       if (raw.settings[k] === undefined) raw.settings[k] = v;
+    }
+    if (!raw.settings.binance_pay_id && process.env.BINANCE_PAY_ID) {
+      raw.settings.binance_pay_id = process.env.BINANCE_PAY_ID;
     }
     if (typeof raw.settings.min_crypto_deposit !== "number" || isNaN(raw.settings.min_crypto_deposit) || raw.settings.min_crypto_deposit <= 0) {
       raw.settings.min_crypto_deposit = 1.00;
@@ -618,7 +623,7 @@ function createDeposit(depositData) {
     user_id: depositData.user_id,
     user_name: depositData.user_name || "",
     amount: Number(depositData.amount) || 0,
-    method: depositData.method, // 'USDT_BEP20' or 'USDT_POLYGON'
+    method: depositData.method, // 'USDT_BEP20', 'USDT_POLYGON' or 'BINANCE_PAY'
     address: depositData.address || "",
     status: "pending", // pending, approved, rejected
     proof: depositData.proof || "",

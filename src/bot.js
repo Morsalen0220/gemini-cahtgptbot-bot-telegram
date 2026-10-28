@@ -39,6 +39,7 @@ const {
   markSecondDepositScreenshotMsgSent,
   createDeposit,
   getDeposit,
+  incrementDepositPaidPrompt,
   approveDeposit,
   rejectDeposit,
   getPendingDeposits,
@@ -1185,12 +1186,28 @@ bot.action(/^deposit_paid:(.+)$/, async (ctx) => {
     recordDepositPaidClick(targetUserId);
   }
 
-  await ctx.reply(
-    `📩 Please send your Transaction Hash (TxID) or payment screenshot below for Deposit <b>${depositId}</b>, or tap <b>"✅ Submit Without Proof"</b> below:`,
+  const promptCount = incrementDepositPaidPrompt(depositId);
+
+  // 1st time: NO "Submit without screenshot" button — just write "Add screenshot here"
+  if (promptCount <= 1) {
+    return ctx.reply(
+      `📸 <b>Add screenshot here</b>`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("❌ Cancel", "menu:wallet")]
+        ])
+      }
+    );
+  }
+
+  // 2nd time (if they didn't give screenshot the 1st time): give the Submit option
+  return ctx.reply(
+    `📸 <b>Add screenshot here</b>\n\nOr tap <b>"✅ Submit"</b> below to submit your deposit:`,
     {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard([
-        [Markup.button.callback("✅ Submit Without TxID / Screenshot", `deposit_submit_noproof:${depositId}`)],
+        [Markup.button.callback("✅ Submit", `deposit_submit_noproof:${depositId}`)],
         [Markup.button.callback("❌ Cancel", "menu:wallet")]
       ])
     }
@@ -1224,8 +1241,49 @@ bot.action(/^deposit_submit_noproof:(.+)$/, async (ctx) => {
 // =====================================================
 // TEXT / PHOTO INPUT HANDLERS
 // =====================================================
+function clearAdminConflictingSession(ctx) {
+  if (!ctx || !ctx.session) return;
+  ctx.session.newProductWizard = null;
+  ctx.session.awaitingCustomQty = null;
+  ctx.session.awaitingRecoverCode = false;
+  ctx.session.awaitingTicketInput = null;
+  ctx.session.awaitingTicketReply = null;
+  ctx.session.awaitingProofForDeposit = null;
+  ctx.session.awaitingSupportReply = false;
+}
+
+bot.action("customer:direct_reply", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.awaitingSupportReply = true;
+  return ctx.reply(
+    "✍️ Write your reply to Admin / Support below:",
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "customer:cancel_reply")]])
+  );
+});
+
 bot.on("text", async (ctx, next) => {
   const text = ctx.message.text.trim();
+
+  // Allow admins to cancel an in-progress customer message or other text action.
+  if (isAdmin(ctx) && text === "/cancel" && (ctx.session.adminAction || ctx.session.newProductWizard)) {
+    ctx.session.adminAction = null;
+    ctx.session.newProductWizard = null;
+    await ctx.reply("❎ Action cancelled.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Admin Menu", "adm:menu")]]));
+    return;
+  }
+
+  // Let slash commands (/admin, /start, /block, /unblock, /pinall, /unpinall) pass through to command handlers
+  if (text.startsWith("/") && text !== "/default" && text !== "/cancel") {
+    return next();
+  }
+
+  // Admin state handlers take priority for admin users so leftover customer states never block admin actions
+  if (isAdmin(ctx) && ctx.session.adminAction) {
+    return handleAdminTextInput(ctx, text);
+  }
+  if (isAdmin(ctx) && ctx.session.newProductWizard) {
+    return handleNewProductWizardInput(ctx, text);
+  }
 
   // Customer replies to an admin-sent message; forward it to the admin inbox.
   if (!isAdmin(ctx) && ctx.session.awaitingSupportReply) {
@@ -1292,35 +1350,35 @@ bot.on("text", async (ctx, next) => {
     return handleReplyTicketFromUser(ctx, ticketId, text, null);
   }
 
-  // If waiting for deposit payment proof (text TxID)
+  // If waiting for deposit payment proof and user didn't send a screenshot the first time
   if (ctx.session.awaitingProofForDeposit) {
     const depositId = ctx.session.awaitingProofForDeposit;
-    ctx.session.awaitingProofForDeposit = null;
     const deposit = getDeposit(depositId);
     if (deposit) {
+      const promptCount = incrementDepositPaidPrompt(depositId);
+      // Since they didn't send a screenshot on the first prompt, give them the Submit option now on the 2nd prompt
+      if (promptCount <= 2) {
+        deposit.proof = text;
+        return ctx.reply(
+          `📸 <b>Add screenshot here</b>\n\nIf you don't have a screenshot, tap <b>"✅ Submit"</b> below to submit your deposit:`,
+          {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback("✅ Submit", `deposit_submit_noproof:${depositId}`)],
+              [Markup.button.callback("❌ Cancel", "menu:wallet")]
+            ])
+          }
+        );
+      }
+      ctx.session.awaitingProofForDeposit = null;
       deposit.proof = text;
       deposit.updated_at = new Date().toISOString();
       await notifyAdminNewDeposit(ctx, deposit);
       return ctx.reply(
-        `✅ Thank you! Your payment proof for Deposit ${depositId} has been submitted.\n\nOur team is verifying the payment and your balance will be credited shortly!`,
+        `✅ Thank you! Your Deposit ${depositId} has been submitted.\n\nOur team is verifying the payment and your balance will be credited shortly!`,
         Markup.inlineKeyboard([[Markup.button.callback("👛 View Wallet", "menu:wallet")]])
       );
     }
-  }
-
-  // Allow admins to cancel an in-progress customer message or other text action.
-  if (isAdmin(ctx) && text.trim() === "/cancel" && ctx.session.adminAction) {
-    ctx.session.adminAction = null;
-    await ctx.reply("❎ Action cancelled.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Admin Menu", "adm:menu")]]));
-    return;
-  }
-
-  // Admin state handlers
-  if (isAdmin(ctx) && ctx.session.newProductWizard) {
-    return handleNewProductWizardInput(ctx, text);
-  }
-  if (isAdmin(ctx) && ctx.session.adminAction) {
-    return handleAdminTextInput(ctx, text);
   }
 
   return next();
@@ -2477,10 +2535,11 @@ bot.action("customer:cancel_reply", async (ctx) => {
 });
 
 // Admin taps this button on an incoming customer message to reply directly.
-bot.action(/^adm:reply_customer:(\d+)$/, async (ctx) => {
+bot.action(/^adm:reply_customer:([^:]+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
-  const userId = String(ctx.match[1]);
+  const userId = String(ctx.match[1]).trim();
+  clearAdminConflictingSession(ctx);
   if (isUserBlocked(userId)) {
     return ctx.reply(
       `🚫 User ${userId} is currently BLOCKED. No messages can be sent to blocked users.\nUnblock them first if you want to reply.`,
@@ -2493,18 +2552,24 @@ bot.action(/^adm:reply_customer:(\d+)$/, async (ctx) => {
   const user = getUser(userId);
   ctx.session.adminAction = { type: "customer_reply", userId };
   const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || userId) : userId;
-  return ctx.reply(`↩️ Write your reply to ${name} (ID: ${userId}).\n\nSend /cancel to cancel.`);
+  return ctx.reply(
+    `↩️ Write your reply to ${name} (ID: ${userId}) below:\n\nSend /cancel to cancel.`,
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:customers:0")]])
+  );
 });
 
 // Admin: Message customer directly by Telegram ID
 bot.action("adm:msg_by_id", async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
+  clearAdminConflictingSession(ctx);
   ctx.session.adminAction = { type: "msg_by_id_prompt" };
-  return ctx.reply(
-    "🆔 Enter the Customer's Telegram ID (e.g. `123456789`), or enter ID and message separated by space:\n\nSend /cancel to cancel.",
-    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:menu")]])
-  );
+  const text = "🆔 Enter the Customer's Telegram ID (e.g. `123456789`), or enter ID and message separated by space:\n\nSend /cancel to cancel.";
+  const markup = Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:menu")]]);
+  if (ctx.callbackQuery) {
+    try { return await ctx.editMessageText(text, markup); } catch (_) {}
+  }
+  return ctx.reply(text, markup);
 });
 
 // =====================================================
@@ -2568,11 +2633,14 @@ bot.action(/^adm:blocked_list:(\d+)$/, async (ctx) => {
 });
 
 async function showBlockedUsersMenu(ctx, page = 0) {
-  const blocked = getBlockedUsers().sort((a, b) => {
-    const aTime = Date.parse(a.blocked_at || a.created_at || 0) || 0;
-    const bTime = Date.parse(b.blocked_at || b.created_at || 0) || 0;
-    return bTime - aTime;
-  });
+  clearAdminConflictingSession(ctx);
+  const blocked = getBlockedUsers()
+    .filter(u => u && u.id !== undefined && u.id !== null)
+    .sort((a, b) => {
+      const aTime = Date.parse(a?.blocked_at || a?.created_at || 0) || 0;
+      const bTime = Date.parse(b?.blocked_at || b?.created_at || 0) || 0;
+      return bTime - aTime;
+    });
 
   const pageSize = 8;
   const pageCount = Math.max(1, Math.ceil(blocked.length / pageSize));
@@ -2593,12 +2661,14 @@ async function showBlockedUsersMenu(ctx, page = 0) {
   } else {
     text += `Blocked Users (Page ${curPage + 1}/${pageCount}):\n`;
     for (const u of visible) {
+      const uid = String(u.id).trim();
       const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || "User";
+      const shortName = safeLabelSlice(name, 14) || "User";
       const uname = u.username ? ` (@${u.username})` : "";
-      text += `🚫 ${name}${uname} — ID: ${u.id}\n`;
+      text += `🚫 ${name}${uname} — ID: ${uid}\n`;
       rows.push([
-        Markup.button.callback(`👤 ${name.slice(0, 16)} (${u.id})`, `adm:customer:${u.id}`),
-        Markup.button.callback("🟢 Unblock", `adm:unblock_user:${u.id}`)
+        Markup.button.callback(`👤 ${shortName} (${uid})`, `adm:customer:${uid}`),
+        Markup.button.callback("🟢 Unblock", `adm:unblock_user:${uid}`)
       ]);
     }
   }
@@ -2637,9 +2707,9 @@ bot.action("adm:unblock_by_id", async (ctx) => {
   );
 });
 
-bot.action(/^adm:block_user:(\d+)$/, async (ctx) => {
+bot.action(/^adm:block_user:([^:]+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
-  const targetId = String(ctx.match[1]);
+  const targetId = String(ctx.match[1]).trim();
   if (targetId === ADMIN_ID) {
     return ctx.answerCbQuery("❌ Cannot block the admin account.", { show_alert: true }).catch(() => {});
   }
@@ -2664,9 +2734,9 @@ bot.action(/^adm:block_user:(\d+)$/, async (ctx) => {
   return ctx.reply(msg, markup);
 });
 
-bot.action(/^adm:unblock_user:(\d+)$/, async (ctx) => {
+bot.action(/^adm:unblock_user:([^:]+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
-  const targetId = String(ctx.match[1]);
+  const targetId = String(ctx.match[1]).trim();
   await ctx.answerCbQuery("🟢 User unblocked!").catch(() => {});
   const user = setUserBlocked(targetId, false);
   const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || targetId) : targetId;
@@ -2687,9 +2757,9 @@ bot.action(/^adm:unblock_user:(\d+)$/, async (ctx) => {
   return ctx.reply(msg, markup);
 });
 
-bot.action(/^adm:purge_msgs:(\d+)$/, async (ctx) => {
+bot.action(/^adm:purge_msgs:([^:]+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
-  const targetId = String(ctx.match[1]);
+  const targetId = String(ctx.match[1]).trim();
   await ctx.answerCbQuery("🗑️ Removing messages from user chat...").catch(() => {});
   const { deletedCount } = await purgeUserChatMessages(targetId);
   return ctx.reply(
@@ -2704,36 +2774,56 @@ bot.action(/^adm:purge_msgs:(\d+)$/, async (ctx) => {
 // Admin: Customer directory with pagination and one-to-one messaging.
 const CUSTOMER_PAGE_SIZE = 8;
 
-bot.action(/^adm:customers:(\d+)$/, async (ctx) => {
+function safeLabelSlice(str, maxChars = 14) {
+  const clean = String(str || "").replace(/[\r\n]+/g, " ").trim();
+  return Array.from(clean).slice(0, maxChars).join("");
+}
+
+bot.action(/^adm:customers(?::(\d+))?$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
-  const users = getAllUsers().sort((a, b) => {
-    const aTime = Date.parse(a.created_at || 0) || 0;
-    const bTime = Date.parse(b.created_at || 0) || 0;
-    return bTime - aTime;
-  });
+  clearAdminConflictingSession(ctx);
+
+  const users = getAllUsers()
+    .filter(u => u && u.id !== undefined && u.id !== null && String(u.id).trim() !== "")
+    .sort((a, b) => {
+      const aTime = Date.parse(a?.created_at || 0) || 0;
+      const bTime = Date.parse(b?.created_at || 0) || 0;
+      return bTime - aTime;
+    });
+
   const pageCount = Math.max(1, Math.ceil(users.length / CUSTOMER_PAGE_SIZE));
-  const page = Math.min(Number(ctx.match[1]) || 0, pageCount - 1);
+  const page = Math.max(0, Math.min(Number(ctx.match[1]) || 0, pageCount - 1));
   const visible = users.slice(page * CUSTOMER_PAGE_SIZE, (page + 1) * CUSTOMER_PAGE_SIZE);
 
-  let text = `👥 CUSTOMERS (${users.length})\nPage ${page + 1}/${pageCount}\n\n`;
-  const rows = visible.map((u) => {
-    const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || "Unnamed customer";
+  let text = `👥 CUSTOMERS & DIRECT MESSAGES (${users.length})\nPage ${page + 1}/${pageCount}\n\n`;
+  if (visible.length === 0) {
+    text += `No registered customers yet.\n\n`;
+  }
+
+  const rows = [];
+  for (const u of visible) {
+    const uid = String(u.id).trim();
+    const rawName = [u.first_name, u.last_name].filter(Boolean).join(" ").trim() || "Customer";
+    const shortName = safeLabelSlice(rawName, 14) || "Customer";
     const username = u.username ? ` @${u.username}` : "";
     const statusBadge = u.is_blocked ? " 🚫 [BLOCKED]" : "";
-    text += `👤 ${name}${username}${statusBadge}\n🆔 ${u.id}  •  Wallet: ${money(Number(u.wallet_balance || 0))}\n\n`;
-    return [
-      Markup.button.callback(`${u.is_blocked ? "🚫 " : ""}${name.slice(0, 20)} · ${u.id}`, `adm:customer:${u.id}`),
-      Markup.button.callback(u.is_blocked ? "🟢 Unblock" : "🚫 Block", u.is_blocked ? `adm:unblock_user:${u.id}` : `adm:block_user:${u.id}`)
-    ];
-  });
+    text += `👤 ${rawName}${username}${statusBadge}\n🆔 ${uid}  •  Wallet: ${money(Number(u.wallet_balance || 0))}\n\n`;
+
+    rows.push([
+      Markup.button.callback(`${u.is_blocked ? "🚫 " : "👤 "}${shortName} (${uid})`, `adm:customer:${uid}`),
+      Markup.button.callback("✉️ Direct Msg", `adm:customer_msg:${uid}`),
+      Markup.button.callback(u.is_blocked ? "🟢 Unblock" : "🚫 Block", u.is_blocked ? `adm:unblock_user:${uid}` : `adm:block_user:${uid}`)
+    ]);
+  }
+
   const nav = [];
   if (page > 0) nav.push(Markup.button.callback("⬅️ Previous", `adm:customers:${page - 1}`));
   if (page < pageCount - 1) nav.push(Markup.button.callback("Next ➡️", `adm:customers:${page + 1}`));
   if (nav.length) rows.push(nav);
   rows.push([
-    Markup.button.callback("🚫 Blocked Users Menu", "adm:blocked_menu"),
-    Markup.button.callback("🆔 Message by ID", "adm:msg_by_id")
+    Markup.button.callback("🆔 Message by ID", "adm:msg_by_id"),
+    Markup.button.callback("🚫 Blocked Users", "adm:blocked_menu")
   ]);
   rows.push([Markup.button.callback("📢 Message All Customers", "adm:broadcast")]);
   rows.push([
@@ -2749,31 +2839,38 @@ bot.action(/^adm:customers:(\d+)$/, async (ctx) => {
   return ctx.reply(text, markup);
 });
 
-bot.action(/^adm:customer:(\d+)$/, async (ctx) => {
+bot.action(/^adm:customer:([^:]+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
-  const userId = ctx.match[1];
+  clearAdminConflictingSession(ctx);
+  const userId = String(ctx.match[1]).trim();
   const u = getUser(userId);
   if (!u) return ctx.reply("❌ Customer not found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Customers", "adm:customers:0")]]));
+  const uid = String(u.id ?? userId).trim();
   const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || "Unnamed customer";
   const blockedStatus = u.is_blocked ? `🚫 BLOCKED${u.blocked_at ? ` (${new Date(u.blocked_at).toLocaleString()})` : ""}` : "🟢 Active";
-  const details = `👤 CUSTOMER DETAILS\n\nName: ${name}\nUsername: ${u.username ? `@${u.username}` : "Not set"}\nTelegram ID: ${u.id}\nStatus: ${blockedStatus}\nWallet: ${money(Number(u.wallet_balance || 0))}\nTotal spent: ${money(Number(u.total_spent || 0))}\nOrders: ${Number(u.orders_count || 0)}\nJoined: ${u.created_at || "Unknown"}`;
+  const details = `👤 CUSTOMER DETAILS\n\nName: ${name}\nUsername: ${u.username ? `@${u.username}` : "Not set"}\nTelegram ID: ${uid}\nStatus: ${blockedStatus}\nWallet: ${money(Number(u.wallet_balance || 0))}\nTotal spent: ${money(Number(u.total_spent || 0))}\nOrders: ${Number(u.orders_count || 0)}\nJoined: ${u.created_at || "Unknown"}`;
   const actionButtons = [];
   if (!u.is_blocked) {
-    actionButtons.push([Markup.button.callback("✉️ Send Message", `adm:customer_msg:${u.id}`)]);
-    actionButtons.push([Markup.button.callback("🚫 Block User & Remove Sent Messages", `adm:block_user:${u.id}`)]);
+    actionButtons.push([Markup.button.callback("✉️ Send Direct Message", `adm:customer_msg:${uid}`)]);
+    actionButtons.push([Markup.button.callback("🚫 Block User & Remove Sent Messages", `adm:block_user:${uid}`)]);
   } else {
-    actionButtons.push([Markup.button.callback("🟢 Unblock User", `adm:unblock_user:${u.id}`)]);
-    actionButtons.push([Markup.button.callback("🗑️ Delete Sent Messages Again", `adm:purge_msgs:${u.id}`)]);
+    actionButtons.push([Markup.button.callback("🟢 Unblock User", `adm:unblock_user:${uid}`)]);
+    actionButtons.push([Markup.button.callback("🗑️ Delete Sent Messages Again", `adm:purge_msgs:${uid}`)]);
   }
-  actionButtons.push([Markup.button.callback("🔙 Customers", "adm:customers:0"), Markup.button.callback("🏠 Admin Menu", "adm:menu")]);
-  return ctx.reply(details, Markup.inlineKeyboard(actionButtons));
+  actionButtons.push([Markup.button.callback("🔙 Customers List", "adm:customers:0"), Markup.button.callback("🏠 Admin Menu", "adm:menu")]);
+  const markup = Markup.inlineKeyboard(actionButtons);
+  if (ctx.callbackQuery) {
+    try { return await ctx.editMessageText(details, markup); } catch (_) {}
+  }
+  return ctx.reply(details, markup);
 });
 
-bot.action(/^adm:customer_msg:(\d+)$/, async (ctx) => {
+bot.action(/^adm:customer_msg:([^:]+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
-  const userId = String(ctx.match[1]);
+  clearAdminConflictingSession(ctx);
+  const userId = String(ctx.match[1]).trim();
   if (isUserBlocked(userId)) {
     return ctx.reply(
       `🚫 Customer ${userId} is currently BLOCKED. No message can be sent while they are blocked.\nUnblock them first if you want to message them.`,
@@ -2786,7 +2883,12 @@ bot.action(/^adm:customer_msg:(\d+)$/, async (ctx) => {
   const user = getUser(userId);
   ctx.session.adminAction = { type: "customer_message", userId };
   const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || userId) : userId;
-  return ctx.reply(`✉️ Write the message for ${name} (ID: ${userId}).\n\nSend /cancel to cancel.`);
+  const promptText = `✉️ Write the direct message for ${name} (ID: ${userId}) below:\n\nSend /cancel to cancel.`;
+  const markup = Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", `adm:customer:${userId}`)]]);
+  if (ctx.callbackQuery) {
+    try { return await ctx.editMessageText(promptText, markup); } catch (_) {}
+  }
+  return ctx.reply(promptText, markup);
 });
 
 // Admin: Pending Deposits
@@ -3925,6 +4027,7 @@ async function handleAdminTextInput(ctx, text) {
       }
       try {
         await bot.telegram.sendMessage(targetId, inlineMsg, Markup.inlineKeyboard([
+          [Markup.button.callback("↩️ Reply to Admin", "customer:direct_reply")],
           [
             Markup.button.callback("🎫 Open Ticket", "ticket:new"),
             Markup.button.callback("🛍️ Buy", "menu:buy")
@@ -3932,6 +4035,7 @@ async function handleAdminTextInput(ctx, text) {
         ]));
         return ctx.reply(`✅ Message sent to Telegram ID ${targetId}.`, Markup.inlineKeyboard([
           [Markup.button.callback("🆔 Message Another ID", "adm:msg_by_id")],
+          [Markup.button.callback("👥 Back to Customers", "adm:customers:0")],
           [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
         ]));
       } catch (e) {
@@ -3953,12 +4057,14 @@ async function handleAdminTextInput(ctx, text) {
       const displayName = user ? (user.first_name || targetId) : targetId;
       try {
         await bot.telegram.sendMessage(targetId, text, Markup.inlineKeyboard([
+          [Markup.button.callback("↩️ Reply to Admin", "customer:direct_reply")],
           [
             Markup.button.callback("🎫 Open Ticket", "ticket:new"),
             Markup.button.callback("🛍️ Buy", "menu:buy")
           ]
         ]));
-        return ctx.reply(`✅ Message sent to ${displayName}.`, Markup.inlineKeyboard([
+        return ctx.reply(`✅ Message sent to ${displayName} (ID: ${targetId}).`, Markup.inlineKeyboard([
+          [Markup.button.callback("✉️ Send Another Message", `adm:customer_msg:${targetId}`)],
           [Markup.button.callback("👥 Back to Customers", "adm:customers:0")],
           [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
         ]));
@@ -3981,12 +4087,14 @@ async function handleAdminTextInput(ctx, text) {
       const displayName = user ? (user.first_name || targetId) : targetId;
       try {
         await bot.telegram.sendMessage(targetId, text, Markup.inlineKeyboard([
+          [Markup.button.callback("↩️ Reply to Admin", "customer:direct_reply")],
           [
             Markup.button.callback("🎫 Open Ticket", "ticket:new"),
             Markup.button.callback("🛍️ Buy", "menu:buy")
           ]
         ]));
-        return ctx.reply(`✅ Reply sent to ${displayName}.`, Markup.inlineKeyboard([
+        return ctx.reply(`✅ Reply sent to ${displayName} (ID: ${targetId}).`, Markup.inlineKeyboard([
+          [Markup.button.callback("✉️ Send Another Message", `adm:customer_msg:${targetId}`)],
           [Markup.button.callback("👥 Back to Customers", "adm:customers:0")],
           [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
         ]));

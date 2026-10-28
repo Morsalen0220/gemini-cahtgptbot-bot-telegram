@@ -280,7 +280,21 @@ function normalizeDb(raw) {
     }
   }
 
-  if (!raw.users || typeof raw.users !== "object") raw.users = {};
+  if (!raw.users || typeof raw.users !== "object") {
+    raw.users = {};
+  } else {
+    const cleanedUsers = {};
+    for (const [k, v] of Object.entries(raw.users)) {
+      if (v && typeof v === "object") {
+        const uid = String(v.id ?? k).trim();
+        if (uid && uid !== "undefined" && uid !== "null") {
+          v.id = v.id ?? k;
+          cleanedUsers[uid] = v;
+        }
+      }
+    }
+    raw.users = cleanedUsers;
+  }
   if (!Array.isArray(raw.deposits)) {
     if (raw.deposits && typeof raw.deposits === "object") raw.deposits = Object.values(raw.deposits);
     else raw.deposits = [];
@@ -481,8 +495,22 @@ function dispenseProductCodes(productId, quantity) {
 // USERS & WALLET
 // ----------------------------------------------------
 function getUser(userId) {
+  if (userId === undefined || userId === null) return null;
   const db = load();
-  return db.users[String(userId)] || null;
+  const idStr = String(userId).trim();
+  if (db.users[idStr]) {
+    if (!db.users[idStr].id) db.users[idStr].id = idStr;
+    return db.users[idStr];
+  }
+  const match = Object.entries(db.users || {}).find(
+    ([k, u]) => u && typeof u === "object" && (String(u.id).trim() === idStr || String(k).trim() === idStr)
+  );
+  if (match) {
+    const [k, u] = match;
+    if (!u.id) u.id = k;
+    return u;
+  }
+  return null;
 }
 
 function getOrCreateUser(telegramUser, referrerId = null) {
@@ -561,7 +589,15 @@ function getUserByApiKey(apiKey) {
 }
 
 function getAllUsers() {
-  return Object.values(load().users);
+  const usersObj = load().users || {};
+  return Object.entries(usersObj)
+    .filter(([k, u]) => u && typeof u === "object" && (u.id !== undefined || k))
+    .map(([k, u]) => {
+      if (u.id === undefined || u.id === null || String(u.id).trim() === "") {
+        u.id = k;
+      }
+      return u;
+    });
 }
 
 function isUserBlocked(userId) {
@@ -766,6 +802,16 @@ function createDeposit(depositData) {
 
 function getDeposit(depositId) {
   return load().deposits.find(d => d.id === depositId);
+}
+
+function incrementDepositPaidPrompt(depositId) {
+  const db = load();
+  const deposit = db.deposits.find(d => d.id === depositId);
+  if (!deposit) return 1;
+  deposit.paid_prompt_count = (deposit.paid_prompt_count || 0) + 1;
+  deposit.updated_at = new Date().toISOString();
+  save(db);
+  return deposit.paid_prompt_count;
 }
 
 function approveDeposit(depositId, approvedAmount = null) {
@@ -1149,6 +1195,7 @@ module.exports = {
   markSecondDepositScreenshotMsgSent,
   createDeposit,
   getDeposit,
+  incrementDepositPaidPrompt,
   approveDeposit,
   rejectDeposit,
   getPendingDeposits,

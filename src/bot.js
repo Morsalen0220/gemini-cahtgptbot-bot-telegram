@@ -58,6 +58,12 @@ const {
   getChannelPosts,
   getNextChannelPost,
   addChannelPost,
+  getPromoMessages,
+  getPromoMessage,
+  updatePromoMessage,
+  addPromoMessage,
+  deletePromoMessage,
+  getNextPromoMessage,
   createTicket,
   getTicket,
   getUserTickets,
@@ -678,6 +684,7 @@ const PUBLIC_BOT_COMMANDS = [
 
 const ADMIN_EXTRA_COMMANDS = [
   { command: "admin", description: "🔐 Open Admin Control Panel" },
+  { command: "promos", description: "🎯 1-Click Saved Promo Broadcast (40 Ready)" },
   { command: "products", description: "🛍️ Manage Products, Plans & Prices" },
   { command: "deposits", description: "📥 Review Pending Wallet Deposits" },
   { command: "tickets", description: "🎫 View & Reply to Support Tickets" },
@@ -1218,7 +1225,7 @@ async function showOrderSummary(ctx, productId, qty) {
 
 ━━━━━━━━━━━━━━━━━━━
 ✍️ <b>Terms of Service:</b>
-${escapeHtml(p.terms || "• Instant automated delivery\n• Full replacement guarantee")}`;
+${escapeHtml(p.terms || "• Instant automated delivery\n• 48 Hours Replacement Guarantee")}`;
 
   const backMenu = p.category === "api_key"
     ? "menu:apikey"
@@ -2761,6 +2768,7 @@ async function showAdminDashboard(ctx) {
   const products = getProducts().length;
   const users = getAllUsers().length;
   const blockedCount = getBlockedUsers().length;
+  const totalPromos = getPromoMessages().length;
 
   const text = `🔐 ADMIN DASHBOARD
 
@@ -2768,12 +2776,14 @@ async function showAdminDashboard(ctx) {
 • Registered Users: ${users}
 • Blocked Users: ${blockedCount}
 • Products: ${products}
+• Saved Promo Messages: ${totalPromos} Ready
 • Pending Deposits: ${pendingDeps}
 • Open Support Tickets: ${openTickets}
 
 Select an action below:`;
 
   const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback(`🎯 1-Click Saved Promos (${totalPromos} Ready)`, "adm:promos:all:0")],
     [Markup.button.callback(`📥 Pending Deposits (${pendingDeps})`, "adm:deposits")],
     [Markup.button.callback(`🎫 Support Tickets (${openTickets} Open)`, "adm:tickets")],
     [Markup.button.callback("🛍️ Products & Inventory", "adm:products")],
@@ -2785,7 +2795,7 @@ Select an action below:`;
     [Markup.button.callback("👤 User Balance Adjuster", "adm:user_bal")],
     [Markup.button.callback("⚙️ Force Join & Payment Settings", "adm:settings")],
     [Markup.button.callback("📢 Channel Auto-Poster (2x/Day)", "adm:channel_poster")],
-    [Markup.button.callback("📢 Broadcast Message", "adm:broadcast")],
+    [Markup.button.callback("📢 Custom Broadcast Message", "adm:broadcast")],
     [
       Markup.button.callback("📌 Pin New Message (All Users)", "adm:pin_broadcast"),
       Markup.button.callback("🗑️ Remove All Old Pins", "adm:unpin_all_users")
@@ -3956,7 +3966,7 @@ async function handleNewProductWizardInput(ctx, text) {
     wizard.stock = stock;
     wizard.step = "description";
     return ctx.reply(
-      `📝 <b>Product Description</b>\n\nStock set to: <b>${stock}</b>\nPlease send the product description below (supports multiple lines/bullet points):\n\n<i>Example:</i>\n<code>✨ Official Premium Subscription\n⏳ Validity: 1 Month (Full Warranty)\n⚡ Delivery: Instant Automated Delivery</code>`,
+      `📝 <b>Product Description</b>\n\nStock set to: <b>${stock}</b>\nPlease send the product description below (supports multiple lines/bullet points):\n\n<i>Example:</i>\n<code>✨ Official Premium Subscription\n⏳ Validity: 1 Month\n🛡️ Guarantee: 48 Hours Replacement Guarantee\n⚡ Delivery: Instant Automated Delivery</code>`,
       {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:products")]])
@@ -3984,7 +3994,7 @@ async function handleNewProductWizardInput(ctx, text) {
       stock: wizard.stock,
       outOfStock: wizard.stock <= 0,
       description: description,
-      terms: "• Instant automated delivery\n• Full replacement guarantee",
+      terms: "• Instant automated delivery\n• 48 Hours Replacement Guarantee included",
       codes: [],
       bulk_tiers: buildBulkTiers(wizard.price)
     };
@@ -4436,6 +4446,368 @@ bot.action("adm_send_channel_post_test", async (ctx) => {
   } else {
     await ctx.reply(`❌ Failed to send test post: ${res.error || res.reason}`);
   }
+});
+
+// =====================================================
+// ADMIN: 1-CLICK SAVED PROMO BROADCAST MANAGER (40 READY MESSAGES)
+// =====================================================
+const PROMO_PAGE_SIZE = 8;
+
+bot.command("promos", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  clearAdminConflictingSession(ctx);
+  return showAdminPromosMenu(ctx, "all", 0);
+});
+
+bot.action(/^adm:promos:([^:]+):(\d+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const cat = ctx.match[1] || "all";
+  const page = parseInt(ctx.match[2], 10) || 0;
+  return showAdminPromosMenu(ctx, cat, page);
+});
+
+async function showAdminPromosMenu(ctx, category = "all", page = 0) {
+  const allPromos = getPromoMessages("all");
+  const geminiPromos = getPromoMessages("gemini");
+  const otherPromos = getPromoMessages("other");
+  const list = getPromoMessages(category);
+
+  const pageCount = Math.max(1, Math.ceil(list.length / PROMO_PAGE_SIZE));
+  const curPage = Math.min(Math.max(0, page), pageCount - 1);
+  const visible = list.slice(curPage * PROMO_PAGE_SIZE, (curPage + 1) * PROMO_PAGE_SIZE);
+
+  const activeUsersCount = getAllUsers().filter(u => !u.is_blocked && !isUserBlocked(u.id)).length;
+  const catLabel =
+    category === "gemini"
+      ? `💎 Gemini Promos (${geminiPromos.length})`
+      : category === "other"
+      ? `🛍️ Other Products (${otherPromos.length})`
+      : `📋 All Saved Promos (${allPromos.length})`;
+
+  let text = `🎯 <b>1-CLICK SAVED PROMO BROADCASTS</b>
+━━━━━━━━━━━━━━━━━━━━
+📂 <b>Filter:</b> ${catLabel} — Page ${curPage + 1}/${pageCount}
+👥 <b>Active Target Users:</b> <b>${activeUsersCount}</b> customers
+
+💡 <b>How to use in 1 Click:</b>
+• Tap <b>"🚀 Send"</b> next to any promo below to broadcast it to all ${activeUsersCount} users immediately in 1 click!
+• Or tap a promo's title to <b>Preview, Send & Pin, Post to Channel, or Edit</b> it!
+• Or use the top <b>⚡ Auto-Rotate 1-Click</b> buttons to send the next promo automatically:`;
+
+  const rows = [
+    [
+      Markup.button.callback("⚡ 1-Click Send Next Gemini Promo", "adm:promo_quick:gemini"),
+      Markup.button.callback("⚡ 1-Click Send Next All-Store Promo", "adm:promo_quick:all")
+    ],
+    [
+      Markup.button.callback(
+        `${category === "all" ? "✅ " : ""}📋 All (${allPromos.length})`,
+        "adm:promos:all:0"
+      ),
+      Markup.button.callback(
+        `${category === "gemini" ? "✅ " : ""}💎 Gemini (${geminiPromos.length})`,
+        "adm:promos:gemini:0"
+      ),
+      Markup.button.callback(
+        `${category === "other" ? "✅ " : ""}🛍️ Others (${otherPromos.length})`,
+        "adm:promos:other:0"
+      )
+    ]
+  ];
+
+  visible.forEach((p, idx) => {
+    const globalIdx = curPage * PROMO_PAGE_SIZE + idx + 1;
+    const shortTitle = safeLabelSlice(p.title || `Promo #${globalIdx}`, 28);
+    rows.push([
+      Markup.button.callback(`${globalIdx}. ${shortTitle}`, `adm:promo_view:${p.id}:${category}:${curPage}`),
+      Markup.button.callback("🚀 Send 1-Click", `adm:promo_send:${p.id}`)
+    ]);
+  });
+
+  const navRow = [];
+  if (curPage > 0) {
+    navRow.push(Markup.button.callback("⬅️ Prev Page", `adm:promos:${category}:${curPage - 1}`));
+  }
+  if (curPage < pageCount - 1) {
+    navRow.push(Markup.button.callback("Next Page ➡️", `adm:promos:${category}:${curPage + 1}`));
+  }
+  if (navRow.length > 0) rows.push(navRow);
+
+  rows.push([
+    Markup.button.callback("➕ Add New Saved Promo", "adm:promo_add"),
+    Markup.button.callback("🔙 Admin Menu", "adm:menu")
+  ]);
+
+  const markup = Markup.inlineKeyboard(rows);
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...markup });
+    } catch (_) {}
+  }
+  return ctx.reply(text, { parse_mode: "HTML", ...markup });
+}
+
+// View single saved promo + 1-click actions (Send, Send & Pin, Send to Channel, Edit)
+bot.action(/^adm:promo_view:([^:]+):([^:]+):(\d+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const promoId = ctx.match[1];
+  const category = ctx.match[2] || "all";
+  const page = parseInt(ctx.match[3], 10) || 0;
+  return showAdminPromoDetail(ctx, promoId, category, page);
+});
+
+async function showAdminPromoDetail(ctx, promoId, category = "all", page = 0) {
+  const promo = getPromoMessage(promoId);
+  if (!promo) {
+    return ctx.reply("❌ Promo message not found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Back to Promos", "adm:promos:all:0")]]));
+  }
+
+  const activeUsersCount = getAllUsers().filter(u => !u.is_blocked && !isUserBlocked(u.id)).length;
+  const catBadge = promo.category === "gemini" ? "💎 Gemini Promo" : "🛍️ Store / Multi-Product Promo";
+
+  const text = `🎯 <b>SAVED PROMO PREVIEW</b>
+━━━━━━━━━━━━━━━━━━━━
+🏷️ <b>Title:</b> <b>${escapeHtml(promo.title)}</b>
+📂 <b>Category:</b> ${catBadge}
+👥 <b>Target Audience:</b> <b>${activeUsersCount}</b> active bot users
+
+📋 <b>Message Preview (Exactly how users will see it):</b>
+━━━━━━━━━━━━━━━━━━━━
+${promo.content}
+━━━━━━━━━━━━━━━━━━━━
+👇 <b>Choose a 1-Click Action below:</b>`;
+
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback(`🚀 1-Click Send to All Users (${activeUsersCount})`, `adm:promo_send:${promo.id}`)],
+    [Markup.button.callback(`📌 1-Click Send & PIN to All Users`, `adm:promo_pin:${promo.id}`)],
+    [Markup.button.callback("📢 1-Click Post to Channel", `adm:promo_channel:${promo.id}`)],
+    [
+      Markup.button.callback("📝 Edit Promo Text", `adm:promo_edit_text:${promo.id}`),
+      Markup.button.callback("✏️ Edit Title", `adm:promo_edit_title:${promo.id}`)
+    ],
+    [
+      Markup.button.callback("🔙 Back to Promo List", `adm:promos:${category}:${page}`),
+      Markup.button.callback("🏠 Admin Menu", "adm:menu")
+    ]
+  ]);
+
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
+    } catch (_) {}
+  }
+  return ctx.reply(text, { parse_mode: "HTML", ...buttons });
+}
+
+// Helper to broadcast a saved promo message to all active users (with or without pinning)
+async function executeSavedPromoBroadcast(ctx, promo, shouldPin = false) {
+  const allUsers = getAllUsers();
+  const activeUsers = allUsers.filter(u => !u.is_blocked && !isUserBlocked(u.id));
+  const blockedSkipped = allUsers.length - activeUsers.length;
+  const adminChatId = ctx.chat?.id || ADMIN_ID;
+
+  const actionLabel = shouldPin ? "Sending & PINNING" : "Broadcasting";
+  await ctx.reply(
+    `⏳ <b>${actionLabel} Promo:</b> <b>${escapeHtml(promo.title)}</b>\n` +
+    `👥 Sending to <b>${activeUsers.length}</b> active users in the background (bot remains 100% smooth & responsive)...`,
+    { parse_mode: "HTML" }
+  );
+
+  const userInlineKeyboard = Markup.inlineKeyboard([
+    [
+      Markup.button.callback("🛍️ Buy Now", "menu:buy"),
+      Markup.button.callback("💎 Gemini $0.30", "grp:Gemini")
+    ],
+    [
+      Markup.button.callback("💳 Deposit Funds", "deposit:start"),
+      Markup.button.callback("🎫 Support", "ticket:new")
+    ]
+  ]);
+
+  setImmediate(async () => {
+    let sent = 0;
+    let pinned = 0;
+    let failed = 0;
+
+    for (const u of activeUsers) {
+      if (isUserBlocked(u.id)) continue;
+      try {
+        if (shouldPin) {
+          await rawCallApi("unpinAllChatMessages", { chat_id: u.id }).catch(() => {});
+        }
+        let sentMsg;
+        try {
+          sentMsg = await bot.telegram.sendMessage(u.id, promo.content, {
+            parse_mode: "HTML",
+            disable_web_page_preview: true,
+            ...userInlineKeyboard
+          });
+        } catch (htmlErr) {
+          sentMsg = await bot.telegram.sendMessage(u.id, promo.content.replace(/<[^>]+>/g, ""), userInlineKeyboard);
+        }
+        sent++;
+
+        if (shouldPin && sentMsg && sentMsg.message_id) {
+          await rawCallApi("pinChatMessage", {
+            chat_id: u.id,
+            message_id: sentMsg.message_id,
+            disable_notification: false
+          }).catch(() => {});
+          pinned++;
+        }
+      } catch (e) {
+        failed++;
+      }
+      await new Promise(resolve => setTimeout(resolve, 40));
+    }
+
+    if (shouldPin) {
+      setSetting("pinned_broadcast_text", promo.content);
+    }
+
+    bot.telegram.sendMessage(
+      adminChatId,
+      `✅ <b>1-CLICK PROMO ${shouldPin ? "BROADCAST & PIN " : ""}COMPLETED!</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
+      `🏷️ <b>Promo:</b> ${escapeHtml(promo.title)}\n` +
+      `📨 <b>Delivered:</b> <b>${sent}</b> users` +
+      (shouldPin ? `\n📌 <b>Pinned:</b> <b>${pinned}</b> chats` : "") +
+      `\n❌ <b>Failed/Unreachable:</b> <b>${failed}</b>\n` +
+      `🚫 <b>Blocked (Skipped):</b> <b>${blockedSkipped}</b>`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("🎯 Send Another Saved Promo", "adm:promos:all:0")],
+          [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+        ])
+      }
+    ).catch(() => {});
+  });
+}
+
+// 1-Click Send Saved Promo to All Users
+bot.action(/^adm:promo_send:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const promo = getPromoMessage(ctx.match[1]);
+  if (!promo) return ctx.answerCbQuery("❌ Promo not found.", { show_alert: true }).catch(() => {});
+  await ctx.answerCbQuery(`🚀 Broadcasting: ${promo.title}`).catch(() => {});
+  return executeSavedPromoBroadcast(ctx, promo, false);
+});
+
+// 1-Click Send & Pin Saved Promo to All Users
+bot.action(/^adm:promo_pin:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const promo = getPromoMessage(ctx.match[1]);
+  if (!promo) return ctx.answerCbQuery("❌ Promo not found.", { show_alert: true }).catch(() => {});
+  await ctx.answerCbQuery(`📌 Broadcasting & Pinning: ${promo.title}`).catch(() => {});
+  return executeSavedPromoBroadcast(ctx, promo, true);
+});
+
+// 1-Click Quick Auto-Rotate Send (Next Gemini Promo or Next Store Promo)
+bot.action(/^adm:promo_quick:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const cat = ctx.match[1] === "gemini" ? "gemini" : null;
+  const nextInfo = getNextPromoMessage(cat);
+  if (!nextInfo || !nextInfo.promo) {
+    return ctx.answerCbQuery("❌ No saved promo messages found.", { show_alert: true }).catch(() => {});
+  }
+  await ctx.answerCbQuery(`⚡ Sending #${nextInfo.index}/${nextInfo.total}: ${nextInfo.promo.title}`).catch(() => {});
+  return executeSavedPromoBroadcast(ctx, nextInfo.promo, false);
+});
+
+// 1-Click Post Saved Promo to Official Channel
+bot.action(/^adm:promo_channel:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const promo = getPromoMessage(ctx.match[1]);
+  if (!promo) return ctx.answerCbQuery("❌ Promo not found.", { show_alert: true }).catch(() => {});
+  await ctx.answerCbQuery("📢 Posting promo to channel...").catch(() => {});
+  const res = await sendChannelScheduledPost({
+    id: promo.id,
+    category: promo.category,
+    content: promo.content
+  });
+  if (res.success) {
+    return ctx.reply(
+      `✅ <b>Promo posted to Channel (${escapeHtml(getAllSettings().channel_id)})!</b>\n🏷️ <b>Promo:</b> ${escapeHtml(promo.title)}`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("🔙 Back to Promo", `adm:promo_view:${promo.id}:all:0`)],
+          [Markup.button.callback("🎯 All Saved Promos", "adm:promos:all:0")]
+        ])
+      }
+    );
+  }
+  return ctx.reply(`❌ Could not post to channel: ${res.error || res.reason}`);
+});
+
+// Edit Saved Promo Text (with Typing Box Pre-fill!)
+bot.action(/^adm:promo_edit_text:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const promo = getPromoMessage(ctx.match[1]);
+  if (!promo) return ctx.reply("❌ Promo not found.");
+
+  ctx.session.adminAction = { type: "edit_promo_text", promoId: promo.id };
+  const plainCurrent = String(promo.content || "").trim();
+  const prefill = utf8ByteSlice(plainCurrent, 250);
+
+  await ctx.reply(
+    `📝 <b>Edit Saved Promo Message — ${escapeHtml(promo.title)}</b>\n\n` +
+    `📋 <b>Current Content (Tap to Copy):</b>\n<code>${escapeHtml(plainCurrent)}</code>\n\n` +
+    `💡 নিচের <b>"📲 Load Promo in Typing Box"</b> বাটনে চাপ দিলে আগের লেখাটি সরাসরি আপনার টাইপিং বক্সে চলে আসবে—যতটুকু দরকার এডিট করে Send করুন:`,
+    {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "📲 Load Promo in Typing Box", switch_inline_query_current_chat: prefill }],
+          [{ text: "❌ Cancel", callback_data: `adm:promo_view:${promo.id}:all:0` }]
+        ]
+      }
+    }
+  );
+});
+
+// Edit Saved Promo Title
+bot.action(/^adm:promo_edit_title:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const promo = getPromoMessage(ctx.match[1]);
+  if (!promo) return ctx.reply("❌ Promo not found.");
+
+  ctx.session.adminAction = { type: "edit_promo_title", promoId: promo.id };
+  const prefillTitle = utf8ByteSlice(promo.title || "", 240);
+
+  await ctx.reply(
+    `✏️ <b>Edit Promo Title</b>\n\nCurrent Title: <code>${escapeHtml(promo.title)}</code>\n\nSend the new title below:`,
+    {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "📲 Load Current Title in Typing Box", switch_inline_query_current_chat: prefillTitle }],
+          [{ text: "❌ Cancel", callback_data: `adm:promo_view:${promo.id}:all:0` }]
+        ]
+      }
+    }
+  );
+});
+
+// Add New Saved Promo Message
+bot.action("adm:promo_add", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  ctx.session.adminAction = { type: "add_new_promo" };
+  await ctx.reply(
+    `➕ <b>ADD NEW SAVED PROMO MESSAGE</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
+    `Send the promotional message you want to save to the 1-Click Promo Library.\n` +
+    `• First line will be used as the short button title (or everything as the promo body).\n` +
+    `• HTML tags like <code>&lt;b&gt;bold&lt;/b&gt;</code> and emojis are supported!\n\nSend <code>/cancel</code> to cancel.`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:promos:all:0")]])
+    }
+  );
 });
 
 // Handle admin text inputs
@@ -5000,6 +5372,27 @@ async function handleAdminTextInput(ctx, rawText) {
     }
     case "pin_broadcast": {
       return executePinBroadcastToAllUsers(ctx, text);
+    }
+    case "edit_promo_text": {
+      const updated = updatePromoMessage(action.promoId, { content: text.trim() });
+      if (!updated) return ctx.reply("❌ Promo message not found.");
+      return showAdminPromoDetail(ctx, updated.id, "all", 0);
+    }
+    case "edit_promo_title": {
+      const updated = updatePromoMessage(action.promoId, { title: text.trim() });
+      if (!updated) return ctx.reply("❌ Promo message not found.");
+      return showAdminPromoDetail(ctx, updated.id, "all", 0);
+    }
+    case "add_new_promo": {
+      const cleaned = text.trim();
+      const firstLine = cleaned.split("\n")[0].replace(/<[^>]+>/g, "").trim() || "Custom Promo";
+      const isGemini = /gemini/i.test(cleaned);
+      const created = addPromoMessage({
+        category: isGemini ? "gemini" : "other",
+        title: firstLine.slice(0, 45),
+        content: cleaned
+      });
+      return showAdminPromoDetail(ctx, created.id, "all", 0);
     }
     default:
       return ctx.reply("Unknown action.");

@@ -9,6 +9,7 @@ const {
   listenFirebaseData
 } = require("./firebase");
 const { defaultChannelPosts } = require("./channelPosts");
+const { defaultPromoMessages } = require("./promoMessages");
 
 const file = process.env.DATABASE_FILE || "./data/bot-data.json";
 fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -37,7 +38,9 @@ const defaultSettings = {
   channel_last_post_slot: "",
   deposit_paid_auto_msg: "⏳ Thank you for clicking I've Paid! We are verifying your payment. Please make sure to send your Transaction Hash (TxID) or screenshot if you haven't already. Your balance will be added shortly!",
   deposit_second_auto_msg: "✅ We have received your payment screenshot! Our admin team is reviewing your proof now and your wallet balance will be credited shortly.",
-  deleted_product_ids: []
+  deleted_product_ids: [],
+  promo_rotation_index: 0,
+  promo_gemini_rotation_index: 0
 };
 
 const LEGACY_REMOVED_IDS = new Set([
@@ -80,7 +83,7 @@ const defaultProducts = [
     stock: 1048,
     outOfStock: false,
     bulk_tiers: buildBulkTiers(0.30),
-    description: `✨ Google One AI Premium (Gemini Advanced + 2TB Cloud Storage)
+    description: `✨ Google One AI Premium (Gemini Advanced + 5TB Cloud Storage)
 ⏳ Validity: 18 Months Official Plan
 📧 Activation: Direct Redeem Link on Your Own Gmail
 🔥 Bulk Offer: Buy 5+ for 10% OFF • Up to 30% OFF on Bulk!
@@ -99,7 +102,7 @@ const defaultProducts = [
     stock: 520,
     outOfStock: false,
     bulk_tiers: buildBulkTiers(0.30),
-    description: `✨ Google Gemini Advanced + 2TB Google One Cloud Storage
+    description: `✨ Google Gemini Advanced + 5TB Google One Cloud Storage
 ⏳ Validity: 12 Months Pre-Activated Plan
 🔐 Access: Private Ready Gmail Account (Full Login Access)
 🔥 Bulk Offer: Buy 5+ for 10% OFF • Up to 30% OFF on Bulk!
@@ -1177,15 +1180,55 @@ const defaultProducts = [
   }
 ];
 
-// Ensure every default product has progressive bulk discount tiers (5+ = 10% OFF up to 100+ = 30% OFF)
+// Ensure every product has "48 Hours Replacement Guarantee" in its description and terms
+function ensure48HourReplacementGuarantee(prod) {
+  if (!prod || typeof prod !== "object") return prod;
+
+  // 1. Update Description
+  let desc = String(prod.description || "").trim();
+  // Remove old conflicting parenthetical warranty/guarantee phrases in validity lines
+  desc = desc
+    .replace(/\s*\([^)]*(?:Warranty|Guarantee)[^)]*\)/gi, "")
+    .replace(/\bFull Warranty\b/gi, "Official Plan")
+    .replace(/•\s*100%\s*Guaranteed/gi, "")
+    .trim();
+
+  if (!/48\s*-?\s*Hours?\s+Replacement\s+Guarantee/i.test(desc)) {
+    const lines = desc.split("\n").map(l => l.trim()).filter(Boolean);
+    // Remove any existing generic guarantee line if present
+    const filtered = lines.filter(l => !/^🛡️\s*Guarantee:/i.test(l));
+    filtered.push("🛡️ Guarantee: 48 Hours Replacement Guarantee");
+    desc = filtered.join("\n");
+  }
+  prod.description = desc;
+
+  // 2. Update Terms
+  let terms = String(prod.terms || "").trim();
+  if (!/48\s*-?\s*Hours?\s+Replacement\s+Guarantee/i.test(terms)) {
+    const termLines = terms
+      .split("\n")
+      .map(l => l.trim())
+      .filter(Boolean)
+      .filter(l => !/(?:warranty|replacement|guarantee)/i.test(l));
+    termLines.push("• 48 Hours Replacement Guarantee included");
+    terms = termLines.join("\n");
+  }
+  prod.terms = terms;
+
+  return prod;
+}
+
+// Ensure every default product has progressive bulk discount tiers (5+ = 10% OFF up to 100+ = 30% OFF) and 48 Hours Replacement Guarantee
 for (const dp of defaultProducts) {
   dp.bulk_tiers = buildBulkTiers(dp.price);
+  ensure48HourReplacementGuarantee(dp);
 }
 
 const defaults = {
   settings: defaultSettings,
   products: defaultProducts,
   channel_posts: defaultChannelPosts,
+  promo_messages: defaultPromoMessages,
   users: {},
   deposits: [],
   orders: [],
@@ -1269,9 +1312,16 @@ function normalizeDb(raw) {
   }
 
   // Ensure every product has the progressive bulk discount tiers (5+ = 10% OFF, 10+ = 15% OFF, 25+ = 20% OFF, 50+ = 25% OFF, 100+ = 30% OFF)
+  // and 48 Hours Replacement Guarantee in description & terms
   for (const prod of raw.products) {
     if (!Array.isArray(prod.bulk_tiers) || !prod.bulk_tiers.some(t => t.min === 5 && t.discount_pct === 10)) {
       prod.bulk_tiers = buildBulkTiers(prod.price);
+    }
+    if ((String(prod.id) === "gemini_18m" || String(prod.id) === "gemini_12m_acc") && !prod.admin_modified_desc) {
+      prod.description = String(prod.description || "").replace(/\b2TB\b/gi, "5TB");
+    }
+    if (!prod.admin_modified_desc) {
+      ensure48HourReplacementGuarantee(prod);
     }
   }
 
@@ -1296,6 +1346,24 @@ function normalizeDb(raw) {
       if (!raw.channel_posts.includes(cp)) {
         raw.channel_posts.push(cp);
       }
+    }
+  }
+
+  // Ensure promo_messages is populated with all 40 default promotional broadcast messages
+  if (!Array.isArray(raw.promo_messages)) {
+    if (raw.promo_messages && typeof raw.promo_messages === "object") {
+      raw.promo_messages = Object.values(raw.promo_messages);
+    } else {
+      raw.promo_messages = structuredClone(defaultPromoMessages);
+    }
+  }
+  for (const defPromo of defaultPromoMessages) {
+    const exists = raw.promo_messages.find(pm => pm && String(pm.id) === String(defPromo.id));
+    if (!exists) {
+      raw.promo_messages.push(structuredClone(defPromo));
+    } else {
+      exists.title = String(exists.title || "").replace(/\b2TB\b/gi, "5TB");
+      exists.content = String(exists.content || "").replace(/\b2TB\b/gi, "5TB");
     }
   }
 
@@ -1489,6 +1557,9 @@ function updateProduct(id, fields) {
   const idx = db.products.findIndex(p => String(p.id) === String(id));
   if (idx === -1) throw new Error("Product not found");
   const updatedFields = { ...fields, admin_modified: true };
+  if (fields.description !== undefined || fields.terms !== undefined) {
+    updatedFields.admin_modified_desc = true;
+  }
   if (updatedFields.price !== undefined && updatedFields.bulk_tiers === undefined) {
     updatedFields.bulk_tiers = buildBulkTiers(updatedFields.price);
   }
@@ -1502,6 +1573,7 @@ function addProduct(product) {
   if (!Array.isArray(product.bulk_tiers) || !product.bulk_tiers.some(t => t.min === 5)) {
     product.bulk_tiers = buildBulkTiers(product.price);
   }
+  ensure48HourReplacementGuarantee(product);
   db.products.push(product);
   save(db);
   return product;
@@ -2161,6 +2233,74 @@ function addChannelPost(newPost) {
 }
 
 // ----------------------------------------------------
+// SAVED PROMOTIONAL BROADCAST MESSAGES (40 READY PROMOS)
+// ----------------------------------------------------
+function getPromoMessages(category = null) {
+  const db = load();
+  if (!Array.isArray(db.promo_messages) || db.promo_messages.length === 0) {
+    db.promo_messages = structuredClone(defaultPromoMessages);
+    save(db);
+  }
+  if (!category || category === "all") {
+    return db.promo_messages;
+  }
+  return db.promo_messages.filter(p => String(p.category || "").toLowerCase() === String(category).toLowerCase());
+}
+
+function getPromoMessage(id) {
+  const promos = getPromoMessages();
+  return promos.find(p => String(p.id) === String(id)) || null;
+}
+
+function updatePromoMessage(id, fields) {
+  const db = load();
+  if (!Array.isArray(db.promo_messages)) db.promo_messages = structuredClone(defaultPromoMessages);
+  const idx = db.promo_messages.findIndex(p => String(p.id) === String(id));
+  if (idx === -1) return null;
+  db.promo_messages[idx] = { ...db.promo_messages[idx], ...fields };
+  save(db);
+  return db.promo_messages[idx];
+}
+
+function addPromoMessage(promoData) {
+  const db = load();
+  if (!Array.isArray(db.promo_messages)) db.promo_messages = structuredClone(defaultPromoMessages);
+  const nextNum = db.promo_messages.length + 1;
+  const newPromo = {
+    id: promoData.id || `promo_custom_${Date.now()}_${nextNum}`,
+    category: promoData.category || "gemini",
+    title: promoData.title || `Custom Promo #${nextNum}`,
+    content: promoData.content || ""
+  };
+  db.promo_messages.push(newPromo);
+  save(db);
+  return newPromo;
+}
+
+function deletePromoMessage(id) {
+  const db = load();
+  if (!Array.isArray(db.promo_messages)) return false;
+  const idx = db.promo_messages.findIndex(p => String(p.id) === String(id));
+  if (idx === -1) return false;
+  db.promo_messages.splice(idx, 1);
+  save(db);
+  return true;
+}
+
+function getNextPromoMessage(category = null) {
+  const db = load();
+  const list = getPromoMessages(category);
+  if (!list || list.length === 0) return null;
+  const settingKey = category === "gemini" ? "promo_gemini_rotation_index" : "promo_rotation_index";
+  let idx = Number(db.settings[settingKey] || 0);
+  if (idx < 0 || idx >= list.length) idx = 0;
+  const chosen = list[idx];
+  db.settings[settingKey] = (idx + 1) % list.length;
+  save(db);
+  return { promo: chosen, index: idx + 1, total: list.length };
+}
+
+// ----------------------------------------------------
 // SUPPORT TICKETS
 // ----------------------------------------------------
 function createTicket(ticketData) {
@@ -2312,6 +2452,12 @@ module.exports = {
   getChannelPosts,
   getNextChannelPost,
   addChannelPost,
+  getPromoMessages,
+  getPromoMessage,
+  updatePromoMessage,
+  addPromoMessage,
+  deletePromoMessage,
+  getNextPromoMessage,
   createTicket,
   getTicket,
   getUserTickets,

@@ -36,93 +36,1060 @@ const defaultSettings = {
   channel_post_index: 0,
   channel_last_post_slot: "",
   deposit_paid_auto_msg: "⏳ Thank you for clicking I've Paid! We are verifying your payment. Please make sure to send your Transaction Hash (TxID) or screenshot if you haven't already. Your balance will be added shortly!",
-  deposit_second_auto_msg: "✅ We have received your payment screenshot! Our admin team is reviewing your proof now and your wallet balance will be credited shortly."
+  deposit_second_auto_msg: "✅ We have received your payment screenshot! Our admin team is reviewing your proof now and your wallet balance will be credited shortly.",
+  deleted_product_ids: []
 };
 
+const LEGACY_REMOVED_IDS = new Set([
+  "netflix_1m",
+  "duolingo_12m",
+  "adobe_express_12m",
+  "apple_music_5m"
+]);
+
+function buildBulkTiers(basePrice) {
+  const p = Number(basePrice) || 0;
+  const calcTierPrice = (pctOff) => {
+    const raw = p * (1 - pctOff / 100);
+    const twoDec = Number(raw.toFixed(2));
+    if (pctOff > 0 && twoDec >= p && p > 0) {
+      return Number(raw.toFixed(3));
+    }
+    return Math.max(0.01, twoDec);
+  };
+  return [
+    { min: 1, max: 4, discount_pct: 0, price: Number(p.toFixed(2)) },
+    { min: 5, max: 9, discount_pct: 10, price: calcTierPrice(10) },
+    { min: 10, max: 24, discount_pct: 15, price: calcTierPrice(15) },
+    { min: 25, max: 49, discount_pct: 20, price: calcTierPrice(20) },
+    { min: 50, max: 99, discount_pct: 25, price: calcTierPrice(25) },
+    { min: 100, max: 999999, discount_pct: 30, price: calcTierPrice(30) }
+  ];
+}
+
 const defaultProducts = [
+  // ==========================================
+  // 1. GEMINI (2 PLANS)
+  // ==========================================
   {
     id: "gemini_18m",
-    name: "Gemini Links 18M",
+    name: "Gemini Advanced 18M (Redeem Link)",
+    group: "Gemini",
     category: "standard",
-    price: 0.55,
+    price: 0.30,
     stock: 1048,
     outOfStock: false,
-    bulk_tiers: [
-      { min: 1, max: 100, price: 0.55 },
-      { min: 101, max: 999999, price: 0.50 }
-    ],
-    description: `✅ Official 18-Month Plan on your Gmail (2TB Cloud Storage)
-⚡️ Instant automated redeem link delivery • 100% Guaranteed`,
-    terms: `• Fresh & valid redeem link delivered instantly
+    bulk_tiers: buildBulkTiers(0.30),
+    description: `✨ Google One AI Premium (Gemini Advanced + 2TB Cloud Storage)
+⏳ Validity: 18 Months Official Plan
+📧 Activation: Direct Redeem Link on Your Own Gmail
+🔥 Bulk Offer: Buy 5+ for 10% OFF • Up to 30% OFF on Bulk!
+⚡ Delivery: Instant Automated Delivery • 100% Guaranteed`,
+    terms: `• Fresh & valid official redeem link delivered instantly
 • Must redeem within 24 hours of delivery
-• Non-refundable after delivery`,
+• Full replacement guarantee if link is invalid`,
     codes: []
   },
   {
-    id: "netflix_1m",
-    name: "Netflix 1M 4K HDR",
+    id: "gemini_12m_acc",
+    name: "Gemini Advanced 12M (Ready Account)",
+    group: "Gemini",
+    category: "standard",
+    price: 0.30,
+    stock: 520,
+    outOfStock: false,
+    bulk_tiers: buildBulkTiers(0.30),
+    description: `✨ Google Gemini Advanced + 2TB Google One Cloud Storage
+⏳ Validity: 12 Months Pre-Activated Plan
+🔐 Access: Private Ready Gmail Account (Full Login Access)
+🔥 Bulk Offer: Buy 5+ for 10% OFF • Up to 30% OFF on Bulk!
+⚡ Delivery: Instant Automated Account Credentials`,
+    terms: `• Full private account login (Email + Password)
+• Change password & recovery details after login
+• 100% full period warranty`,
+    codes: []
+  },
+
+  // ==========================================
+  // 2. CLAUDE AI (6 PLANS)
+  // ==========================================
+  {
+    id: "claude_plan_1",
+    name: "Claude 3.5 Sonnet Pro — 7 Days",
+    group: "Claude AI",
+    category: "standard",
+    price: 1.50,
+    stock: 210,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 1.50 },
+      { min: 21, max: 999999, price: 1.35 }
+    ],
+    description: `🤖 Anthropic Claude Pro (Claude 3.5 Sonnet & Opus)
+⏳ Validity: 7 Days Full Pro Access
+🔓 Access: Ready Account • 5x More Usage vs Free Tier
+⚡ Delivery: Instant Automated Login Delivery`,
+    terms: `• Valid for 7 full days from purchase
+• Instant replacement if login issue occurs`,
+    codes: []
+  },
+  {
+    id: "claude_plan_2",
+    name: "Claude Pro — 1 Month (Shared)",
+    group: "Claude AI",
+    category: "standard",
+    price: 4.50,
+    stock: 185,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 4.50 },
+      { min: 11, max: 999999, price: 4.00 }
+    ],
+    description: `🤖 Anthropic Claude Pro Subscription (Shared Access)
+⏳ Validity: 1 Month (30 Days Full Warranty)
+🚀 Features: Claude 3.5 Sonnet, Artifacts & Priority Bandwidth
+⚡ Delivery: Instant Automated Credentials`,
+    terms: `• Do not change account password or security settings
+• Full 30-day warranty included`,
+    codes: []
+  },
+  {
+    id: "claude_plan_3",
+    name: "Claude Pro — 1 Month (Private)",
+    group: "Claude AI",
+    category: "standard",
+    price: 9.50,
+    stock: 110,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 9.50 },
+      { min: 11, max: 999999, price: 8.80 }
+    ],
+    description: `🤖 Anthropic Claude Pro Subscription (100% Private Account)
+⏳ Validity: 1 Month (30 Days Full Guarantee)
+🔐 Access: Dedicated Private Account • Projects & 200K Context
+⚡ Delivery: Instant Automated Delivery`,
+    terms: `• 100% private dedicated account for single user
+• Full 30-day replacement guarantee`,
+    codes: []
+  },
+  {
+    id: "claude_plan_4",
+    name: "Claude Pro — 1 Month (On Your Email)",
+    group: "Claude AI",
+    category: "standard",
+    price: 12.50,
+    stock: 80,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 12.50 },
+      { min: 11, max: 999999, price: 11.50 }
+    ],
+    description: `🤖 Official Claude Pro Upgrade on Your Personal Account
+⏳ Validity: 1 Month Official Subscription
+📧 Activation: Direct Upgrade / Invite on Your Own Email
+⚡ Delivery: Fast Automated Activation Code / Link`,
+    terms: `• Activated directly on your own email address
+• 100% safe official billing • Full 30-day guarantee`,
+    codes: []
+  },
+  {
+    id: "claude_plan_5",
+    name: "Claude Team Plan — 1 Month (Private Seat)",
+    group: "Claude AI",
+    category: "standard",
+    price: 15.00,
+    stock: 65,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 15.00 },
+      { min: 11, max: 999999, price: 13.80 }
+    ],
+    description: `🤖 Claude AI Team Workspace (Higher Message Limits than Pro)
+⏳ Validity: 1 Month Official Private Team Seat
+🚀 Features: 200K Context Window, Projects & Priority Access
+⚡ Delivery: Instant Automated Workspace Invite`,
+    terms: `• Private seat inside verified Claude Team Workspace
+• Higher usage quota than standard Pro plan`,
+    codes: []
+  },
+  {
+    id: "claude_plan_6",
+    name: "Claude Pro — 3 Months (Private)",
+    group: "Claude AI",
+    category: "standard",
+    price: 24.00,
+    stock: 45,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 5, price: 24.00 },
+      { min: 6, max: 999999, price: 22.00 }
+    ],
+    description: `🤖 Anthropic Claude Pro Long-Term Plan (100% Private)
+⏳ Validity: 3 Months (90 Days Full Replacement Warranty)
+🔐 Access: Full Private Account • Uninterrupted Coding & Writing
+⚡ Delivery: Instant Automated Account Delivery`,
+    terms: `• 100% private account with 90-day full guarantee
+• Instant automated delivery upon payment`,
+    codes: []
+  },
+
+  // ==========================================
+  // 3. CHATGPT (3 PLANS)
+  // ==========================================
+  {
+    id: "chatgpt_plan_1",
+    name: "ChatGPT Plus — 1 Month (Shared)",
+    group: "ChatGPT",
+    category: "standard",
+    price: 1.80,
+    stock: 340,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 1.80 },
+      { min: 21, max: 999999, price: 1.55 }
+    ],
+    description: `🧠 OpenAI ChatGPT Plus (GPT-4o, o1 Reasoning, DALL·E 3 & Voice)
+⏳ Validity: 1 Month (30 Days Full Warranty)
+🔓 Access: Premium Shared Account • High Stability
+⚡ Delivery: Instant Automated Login Credentials`,
+    terms: `• Do not change password or share login outside
+• Full 30-day warranty & instant support`,
+    codes: []
+  },
+  {
+    id: "chatgpt_plan_2",
+    name: "ChatGPT Plus — 1 Month (Private)",
+    group: "ChatGPT",
+    category: "standard",
+    price: 5.50,
+    stock: 150,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 5.50 },
+      { min: 11, max: 999999, price: 5.00 }
+    ],
+    description: `🧠 OpenAI ChatGPT Plus (100% Private Personal Account)
+⏳ Validity: 1 Month (30 Days Full Replacement Guarantee)
+🔐 Access: Full Email & Password Access • All GPT-4o Features
+⚡ Delivery: Instant Automated Account Delivery`,
+    terms: `• Dedicated private account for your sole use
+• Full 30-day warranty included`,
+    codes: []
+  },
+  {
+    id: "chatgpt_plan_3",
+    name: "ChatGPT Team Workspace — 1 Month (On Your Email)",
+    group: "ChatGPT",
+    category: "standard",
+    price: 7.50,
+    stock: 120,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 7.50 },
+      { min: 11, max: 999999, price: 6.80 }
+    ],
+    description: `🧠 ChatGPT Team Plan on Your Own Email (2x Higher Message Caps)
+⏳ Validity: 1 Month Private Workspace Seat
+📧 Activation: Direct Official Invite Link to Your Personal Email
+⚡ Delivery: Instant Automated Invite Link`,
+    terms: `• Private workspace seat on your own OpenAI account
+• Data excluded from training by default • 30-day guarantee`,
+    codes: []
+  },
+
+  // ==========================================
+  // 4. CAPCUT (3 PLANS)
+  // ==========================================
+  {
+    id: "capcut_plan_1",
+    name: "CapCut Pro — 1 Month",
+    group: "CapCut",
+    category: "standard",
+    price: 0.90,
+    stock: 410,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 30, price: 0.90 },
+      { min: 31, max: 999999, price: 0.75 }
+    ],
+    description: `🎬 CapCut Pro Official Subscription (PC, Mobile & Web)
+⏳ Validity: 1 Month (30 Days Full Warranty)
+✨ Features: All Pro Effects, Auto Captions, AI Tools & 100GB Cloud
+⚡ Delivery: Instant Automated Account Delivery`,
+    terms: `• Works on Windows, Mac, iOS & Android
+• Full 30-day replacement guarantee`,
+    codes: []
+  },
+  {
+    id: "capcut_plan_2",
+    name: "CapCut Pro — 6 Months",
+    group: "CapCut",
+    category: "standard",
+    price: 3.50,
+    stock: 190,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 3.50 },
+      { min: 21, max: 999999, price: 3.10 }
+    ],
+    description: `🎬 CapCut Pro 6-Month Plan (All Devices Supported)
+⏳ Validity: 6 Months (180 Days Full Warranty)
+✨ Features: 4K 60fps Export, AI Background Remover & No Watermark
+⚡ Delivery: Instant Automated Login Credentials`,
+    terms: `• Valid for 6 months across PC and Mobile
+• Full period replacement warranty`,
+    codes: []
+  },
+  {
+    id: "capcut_plan_3",
+    name: "CapCut Pro — 12 Months (1 Year)",
+    group: "CapCut",
+    category: "standard",
+    price: 5.90,
+    stock: 140,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 5.90 },
+      { min: 11, max: 999999, price: 5.20 }
+    ],
+    description: `🎬 CapCut Pro Annual Subscription (PC, iOS & Android)
+⏳ Validity: 12 Months (365 Days Full Guarantee)
+✨ Features: Unlimited Pro Templates, AI Effects & Cloud Storage
+⚡ Delivery: Instant Automated Account Delivery`,
+    terms: `• Full 1-year warranty included
+• Instant automated login delivery`,
+    codes: []
+  },
+
+  // ==========================================
+  // 5. CANVA (2 PLANS)
+  // ==========================================
+  {
+    id: "canva_plan_1",
+    name: "Canva Pro — 1 Year (On Your Email)",
+    group: "Canva",
+    category: "standard",
+    price: 0.60,
+    stock: 520,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 50, price: 0.60 },
+      { min: 51, max: 999999, price: 0.45 }
+    ],
+    description: `🎨 Canva Pro / Edu Premium (100M+ Pro Stock, Brand Kit & Magic AI)
+⏳ Validity: 12 Months (1 Year Full Warranty)
+📧 Activation: Direct Invite Link on Your Own Canva Email
+⚡ Delivery: Instant Automated Invite Link`,
+    terms: `• Activates directly on your personal Canva account
+• Designs remain 100% private to you • 1-year guarantee`,
+    codes: []
+  },
+  {
+    id: "canva_plan_2",
+    name: "Canva Edu Owner / Admin Panel (500 Seats)",
+    group: "Canva",
+    category: "standard",
+    price: 3.50,
+    stock: 95,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 3.50 },
+      { min: 11, max: 999999, price: 3.00 }
+    ],
+    description: `🎨 Canva Education Owner / Admin Account (Invite up to 500 Users)
+⏳ Validity: Lifetime / Long-Term Verified Admin Panel
+🔐 Access: Full Private Owner Login (Changeable Email & Password)
+⚡ Delivery: Instant Automated Account Credentials`,
+    terms: `• Full admin control to invite and manage up to 500 members
+• Change password immediately after first login`,
+    codes: []
+  },
+
+  // ==========================================
+  // 6. GMAIL (2 PLANS)
+  // ==========================================
+  {
+    id: "gmail_plan_1",
+    name: "Fresh Verified Gmail Account",
+    group: "Gmail",
+    category: "standard",
+    price: 0.20,
+    stock: 1500,
+    outOfStock: false,
+    bulk_tiers: buildBulkTiers(0.20),
+    description: `📧 Fresh High-Quality Google / Gmail Account
+🛡️ Status: Clean IP Created • Recovery Email Attached
+🔓 Usage: Ready for App Signups, YouTube, Gemini & Social Media
+🔥 Bulk Offer: Buy 5+ for 10% OFF • Up to 30% OFF on Bulk!
+⚡ Delivery: Instant Automated (Email + Password + Recovery)`,
+    terms: `• 100% fresh unused Gmail account
+• Update recovery info after first login`,
+    codes: []
+  },
+  {
+    id: "gmail_plan_2",
+    name: "Aged USA Gmail Account",
+    group: "Gmail",
+    category: "standard",
+    price: 0.45,
+    stock: 640,
+    outOfStock: false,
+    bulk_tiers: buildBulkTiers(0.45),
+    description: `📧 Aged USA Google / Gmail Account
+🛡️ Status: High Trust Score • Warmed Up & Long-Lasting
+🔓 Usage: Ideal for Google Cloud, Ads, Cold Outreach & Business
+🔥 Bulk Offer: Buy 5+ for 10% OFF • Up to 30% OFF on Bulk!
+⚡ Delivery: Instant Automated (Email + Password + Recovery)`,
+    terms: `• Verified aged USA account with recovery mail included
+• Replacement guarantee on initial login`,
+    codes: []
+  },
+
+  // ==========================================
+  // 7. AUTODESK (3 PLANS)
+  // ==========================================
+  {
+    id: "autodesk_plan_1",
+    name: "Autodesk AutoCAD — 1 Year (On Your Email)",
+    group: "Autodesk",
     category: "standard",
     price: 2.50,
-    stock: 0,
-    outOfStock: true,
-    bulk_tiers: [],
-    description: `✅ 1 Month 4K UHD Profile (Private PIN)
-⚡️ Instant automated delivery • Works on TV, PC & Mobile`,
-    terms: `• No refunds after credentials are sent
-• Do not change account email or master password`,
-    codes: []
-  },
-  {
-    id: "duolingo_12m",
-    name: "Duolingo 12M",
-    category: "standard",
-    price: 0.40,
-    stock: 294,
+    stock: 160,
     outOfStock: false,
     bulk_tiers: [
-      { min: 1, max: 50, price: 0.40 },
-      { min: 51, max: 999999, price: 0.35 }
+      { min: 1, max: 10, price: 2.50 },
+      { min: 11, max: 999999, price: 2.15 }
     ],
-    description: `✅ Duolingo Super 12 Months (Unlimited hearts & no ads)
-⚡️ Instant activation • 100% Full period guarantee`,
-    terms: `• Non-refundable once activated
-• Guaranteed valid for 12 months`,
+    description: `📐 Official Autodesk AutoCAD (Windows & macOS)
+⏳ Validity: 1 Year (12 Months Official License)
+📧 Activation: Direct Upgrade on Your Personal Autodesk Email
+⚡ Delivery: Instant Automated Activation / Invite`,
+    terms: `• Official download from autodesk.com
+• Full 12-month license warranty`,
     codes: []
   },
   {
-    id: "adobe_express_12m",
-    name: "Adobe Express 12M",
+    id: "autodesk_plan_2",
+    name: "Autodesk All Apps Collection — 1 Year",
+    group: "Autodesk",
     category: "standard",
-    price: 1.00,
-    stock: 204,
+    price: 4.50,
+    stock: 130,
     outOfStock: false,
     bulk_tiers: [
-      { min: 1, max: 50, price: 1.00 },
-      { min: 51, max: 999999, price: 0.90 }
+      { min: 1, max: 10, price: 4.50 },
+      { min: 11, max: 999999, price: 3.90 }
     ],
-    description: `✅ Adobe Express Premium 12 Months + 100GB Cloud
-⚡️ Generative AI credits included • Instant delivery`,
-    terms: `• Full period replacement guarantee
-• Activated directly on Adobe ID`,
+    description: `📐 Autodesk All Apps Bundle (AutoCAD, Revit, Maya, 3ds Max, Fusion 360 + 40 Apps)
+⏳ Validity: 1 Year (12 Months Full Access)
+📧 Activation: Activated Directly on Your Autodesk Account
+⚡ Delivery: Instant Automated Delivery`,
+    terms: `• Includes 45+ official Autodesk desktop & cloud apps
+• 100% guaranteed for 12 months`,
     codes: []
   },
   {
-    id: "apple_music_5m",
-    name: "Apple Music 5M",
+    id: "autodesk_plan_3",
+    name: "Autodesk All Apps Collection — 3 Years",
+    group: "Autodesk",
     category: "standard",
-    price: 0.85,
+    price: 9.50,
+    stock: 75,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 5, price: 9.50 },
+      { min: 6, max: 999999, price: 8.50 }
+    ],
+    description: `📐 Complete Autodesk All Products Bundle (45+ Official Software)
+⏳ Validity: 3 Years (36 Months Full Guarantee)
+📧 Activation: Direct Activation on Your Autodesk ID
+⚡ Delivery: Instant Automated Delivery`,
+    terms: `• Long-term 3-year official access on your account
+• Supports Windows & Mac • Full warranty`,
+    codes: []
+  },
+
+  // ==========================================
+  // 8. MUSE (2 PLANS)
+  // ==========================================
+  {
+    id: "muse_plan_1",
+    name: "MuseScore Pro+ — 1 Month",
+    group: "Muse",
+    category: "standard",
+    price: 1.20,
+    stock: 220,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 1.20 },
+      { min: 21, max: 999999, price: 1.00 }
+    ],
+    description: `🎵 MuseScore Pro+ Official Subscription (Unlimited Sheet Music)
+⏳ Validity: 1 Month (30 Days Full Warranty)
+✨ Features: Unlimited PDF/MIDI/MP3 Downloads & Official Scores
+⚡ Delivery: Instant Automated Account Delivery`,
+    terms: `• Full access to Pro+ sheet music library
+• 30-day replacement guarantee`,
+    codes: []
+  },
+  {
+    id: "muse_plan_2",
+    name: "MuseScore Pro+ — 12 Months (1 Year)",
+    group: "Muse",
+    category: "standard",
+    price: 3.50,
+    stock: 115,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 3.50 },
+      { min: 11, max: 999999, price: 3.00 }
+    ],
+    description: `🎵 MuseScore Pro+ Annual Pass (Full Sheet Library & Practice Tools)
+⏳ Validity: 12 Months (1 Year Full Replacement Guarantee)
+✨ Features: Unlimited Downloads, Track Mixing & Ad-Free Access
+⚡ Delivery: Instant Automated Login Credentials`,
+    terms: `• Valid for 12 full months
+• Instant automated login delivery`,
+    codes: []
+  },
+
+  // ==========================================
+  // SINGLE PRODUCTS (28 ITEMS)
+  // ==========================================
+  {
+    id: "prime_video",
+    name: "PRIME VIDEO",
+    category: "standard",
+    price: 1.35,
+    stock: 260,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 1.35 },
+      { min: 21, max: 999999, price: 1.20 }
+    ],
+    description: `🎬 Amazon Prime Video 4K UHD Subscription
+⏳ Validity: 1 Month (30 Days Full Warranty)
+📺 Support: Smart TV, PC, Mobile & Fire Stick
+⚡ Delivery: Instant Automated Account Delivery`,
+    terms: `• Full 30-day replacement guarantee
+• Do not change master account email`,
+    codes: []
+  },
+  {
+    id: "shahid",
+    name: "SHAHID",
+    category: "standard",
+    price: 2.70,
     stock: 180,
     outOfStock: false,
     bulk_tiers: [
-      { min: 1, max: 50, price: 0.85 },
-      { min: 51, max: 999999, price: 0.75 }
+      { min: 1, max: 20, price: 2.70 },
+      { min: 21, max: 999999, price: 2.40 }
     ],
-    description: `✅ Apple Music 5 Months Individual (Lossless & Spatial Audio)
-⚡️ Instant official promo code delivery • 100% Active`,
-    terms: `• Single use promo code
-• Applicable for new and eligible returning accounts`,
+    description: `📺 Shahid VIP Premium Subscription (Originals, Movies & Live TV)
+⏳ Validity: 1 Month (30 Days Full Warranty)
+✨ Features: Full HD / 4K Streaming • 100% Ad-Free
+⚡ Delivery: Instant Automated Login Credentials`,
+    terms: `• Works on Smart TV, Mobile & Web
+• Full 30-day warranty included`,
     codes: []
   },
+  {
+    id: "apple_tv",
+    name: "APPLE TV",
+    category: "standard",
+    price: 2.25,
+    stock: 195,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 2.25 },
+      { min: 21, max: 999999, price: 2.00 }
+    ],
+    description: `🍎 Apple TV+ Official Premium Subscription (4K HDR / Dolby Atmos)
+⏳ Validity: 1–3 Months Official Access
+📺 Support: Apple Devices, Smart TV, Web & Consoles
+⚡ Delivery: Instant Automated Account / Redeem Code`,
+    terms: `• Instant automated delivery
+• Full period warranty included`,
+    codes: []
+  },
+  {
+    id: "spotify",
+    name: "SPOTIFY",
+    category: "standard",
+    price: 1.50,
+    stock: 340,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 30, price: 1.50 },
+      { min: 31, max: 999999, price: 1.30 }
+    ],
+    description: `🎧 Spotify Premium Individual (Ad-Free Music & Offline Downloads)
+⏳ Validity: 1–3 Months Full Warranty
+🎵 Features: Very High Audio Quality • Unlimited Skips
+⚡ Delivery: Instant Automated Account / Upgrade Link`,
+    terms: `• Works on iOS, Android, PC & Smart Speakers
+• Full warranty for the subscription period`,
+    codes: []
+  },
+  {
+    id: "deezer",
+    name: "DEEZER",
+    category: "standard",
+    price: 1.28,
+    stock: 210,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 1.28 },
+      { min: 21, max: 999999, price: 1.10 }
+    ],
+    description: `🎵 Deezer Premium HiFi Subscription (FLAC Lossless Audio)
+⏳ Validity: 1 Month (30 Days Full Guarantee)
+✨ Features: Ad-Free Listening & Offline Mode on All Devices
+⚡ Delivery: Instant Automated Account Credentials`,
+    terms: `• High-fidelity lossless streaming enabled
+• 30-day replacement guarantee`,
+    codes: []
+  },
+  {
+    id: "edx",
+    name: "EDX",
+    category: "standard",
+    price: 1.50,
+    stock: 175,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 1.50 },
+      { min: 21, max: 999999, price: 1.30 }
+    ],
+    description: `🎓 edX Verified Courses & Official Certificate Access
+⏳ Validity: Full Course Access (100% Verified)
+✨ Features: Top University Courses (Harvard, MIT, Berkeley, IBM)
+⚡ Delivery: Instant Automated Account / Coupon Delivery`,
+    terms: `• Unlock verified track & graded assignments
+• Instant automated delivery`,
+    codes: []
+  },
+  {
+    id: "scribd",
+    name: "SCRIBD",
+    category: "standard",
+    price: 0.90,
+    stock: 290,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 30, price: 0.90 },
+      { min: 31, max: 999999, price: 0.75 }
+    ],
+    description: `📚 Scribd + Everand + SlideShare Premium Subscription
+⏳ Validity: 1–2 Months Full Warranty
+✨ Features: Unlimited eBooks, Audiobooks, Documents & Sheet Music
+⚡ Delivery: Instant Automated Account Delivery`,
+    terms: `• Includes access to Scribd, Everand & SlideShare
+• Full replacement guarantee`,
+    codes: []
+  },
+  {
+    id: "adobe",
+    name: "ADOBE",
+    category: "standard",
+    price: 0.38,
+    stock: 420,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 50, price: 0.38 },
+      { min: 51, max: 999999, price: 0.32 }
+    ],
+    description: `🎨 Adobe Express Premium + Firefly Generative AI Credits
+⏳ Validity: 1–12 Months Promotional Plan
+✨ Features: 100GB Cloud Storage, Premium Templates & AI Tools
+⚡ Delivery: Instant Automated Redeem / Account Delivery`,
+    terms: `• Instant automated delivery to chat
+• Full replacement guarantee if invalid on arrival`,
+    codes: []
+  },
+  {
+    id: "figma",
+    name: "FIGMA",
+    category: "standard",
+    price: 4.65,
+    stock: 130,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 4.65 },
+      { min: 11, max: 999999, price: 4.15 }
+    ],
+    description: `🖌️ Figma Professional Plan (Unlimited Files, Projects & Dev Mode)
+⏳ Validity: 1–2 Years Official Education / Pro Plan
+📧 Activation: Direct Upgrade or Ready Verified Account
+⚡ Delivery: Instant Automated Delivery`,
+    terms: `• Full Figma Professional features & Dev Mode unlocked
+• Long-term validity guarantee`,
+    codes: []
+  },
+  {
+    id: "miro",
+    name: "MIRO",
+    category: "standard",
+    price: 9.75,
+    stock: 85,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 9.75 },
+      { min: 11, max: 999999, price: 8.80 }
+    ],
+    description: `📋 Miro Pro / Education Plan (Unlimited Active Boards & Collaborators)
+⏳ Validity: 1–2 Years Full Official Access
+✨ Features: Private Boards, High-Res Exports & Diagramming Tools
+⚡ Delivery: Instant Automated Account / Upgrade`,
+    terms: `• Full private workspace access
+• Guaranteed active for full validity period`,
+    codes: []
+  },
+  {
+    id: "framer",
+    name: "FRAMER",
+    category: "standard",
+    price: 8.25,
+    stock: 90,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 8.25 },
+      { min: 11, max: 999999, price: 7.40 }
+    ],
+    description: `🚀 Framer Pro Website Builder Plan
+⏳ Validity: 1 Year Official Pro Subscription
+✨ Features: Custom Domain Support, CMS Collections & High Bandwidth
+⚡ Delivery: Instant Automated Promo Code / Account`,
+    terms: `• Build and publish professional no-code sites
+• Instant automated delivery`,
+    codes: []
+  },
+  {
+    id: "notion",
+    name: "NOTION",
+    category: "standard",
+    price: 1.38,
+    stock: 270,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 1.38 },
+      { min: 21, max: 999999, price: 1.18 }
+    ],
+    description: `📝 Notion Plus Plan (Unlimited Blocks, Pages & File Uploads)
+⏳ Validity: 1 Year Official Education / Plus Plan
+✨ Features: 30-Day Version History, Custom Sites & Guest Access
+⚡ Delivery: Instant Automated Account Delivery`,
+    terms: `• 100% private workspace access
+• Full 1-year warranty included`,
+    codes: []
+  },
+  {
+    id: "microsoft",
+    name: "MICROSOFT",
+    category: "standard",
+    price: 0.26,
+    stock: 580,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 50, price: 0.26 },
+      { min: 51, max: 999999, price: 0.20 }
+    ],
+    description: `💻 Microsoft 365 ProPlus (Office Desktop Apps + 1TB OneDrive)
+⏳ Validity: 1 Year / Lifetime Subscription Account
+✨ Apps: Word, Excel, PowerPoint, Outlook & OneNote (5 Devices)
+⚡ Delivery: Instant Automated Account Credentials`,
+    terms: `• Supports Windows, macOS, iOS & Android
+• Change password on initial login`,
+    codes: []
+  },
+  {
+    id: "ilovepdf",
+    name: "ILOVEPDF",
+    category: "standard",
+    price: 0.44,
+    stock: 360,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 50, price: 0.44 },
+      { min: 51, max: 999999, price: 0.36 }
+    ],
+    description: `📄 iLovePDF Premium Subscription (Web, Desktop & Mobile App)
+⏳ Validity: 1 Year (12 Months Full Warranty)
+✨ Features: Unlimited PDF Merge/Convert, OCR, Digital Signatures & No Ads
+⚡ Delivery: Instant Automated Account Delivery`,
+    terms: `• Works across Web, Windows/Mac Desktop & Mobile
+• Full 12-month warranty`,
+    codes: []
+  },
+  {
+    id: "elevenlabs",
+    name: "ELEVENLABS",
+    category: "standard",
+    price: 2.85,
+    stock: 165,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 15, price: 2.85 },
+      { min: 16, max: 999999, price: 2.50 }
+    ],
+    description: `🎙️ ElevenLabs AI Voice Generator (Starter / Creator Plan)
+⏳ Validity: 1 Month (30,000+ Characters Quota)
+✨ Features: Instant Voice Cloning, AI Dubbing & Commercial License
+⚡ Delivery: Instant Automated Account / API Access`,
+    terms: `• Fresh account with full character quota intact
+• Instant automated login delivery`,
+    codes: []
+  },
+  {
+    id: "jetbrains",
+    name: "JETBRAINS",
+    category: "standard",
+    price: 4.13,
+    stock: 145,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 4.13 },
+      { min: 11, max: 999999, price: 3.70 }
+    ],
+    description: `🧑‍💻 JetBrains All Products Pack (IntelliJ IDEA Ultimate, PyCharm, WebStorm, CLion, PhpStorm)
+⏳ Validity: 1 Year (12 Months Official License)
+📧 Activation: Official JetBrains Account / Activation Pack
+⚡ Delivery: Instant Automated Credentials`,
+    terms: `• Unlocks all 15+ JetBrains IDEs on Windows, Mac & Linux
+• Full 12-month warranty`,
+    codes: []
+  },
+  {
+    id: "replit",
+    name: "REPLIT",
+    category: "standard",
+    price: 4.50,
+    stock: 125,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 10, price: 4.50 },
+      { min: 11, max: 999999, price: 4.00 }
+    ],
+    description: `⚡ Replit Core / Pro Plan (Replit AI Agent & Private Repls)
+⏳ Validity: 1–12 Months Developer Plan
+✨ Features: Unlimited Private Repls, Boosted Machines & AI Coding
+⚡ Delivery: Instant Automated Account / Promo Code`,
+    terms: `• Full developer access with AI features enabled
+• Instant automated delivery`,
+    codes: []
+  },
+  {
+    id: "nordvpn",
+    name: "NORDVPN",
+    category: "standard",
+    price: 4.20,
+    stock: 230,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 15, price: 4.20 },
+      { min: 16, max: 999999, price: 3.75 }
+    ],
+    description: `🛡️ NordVPN Premium Subscription (6000+ Ultra-Fast Global Servers)
+⏳ Validity: 1 Year (12 Months Full Replacement Warranty)
+🔐 Features: NordLynx Protocol, Threat Protection & Streaming Unblock
+⚡ Delivery: Instant Automated Account Credentials`,
+    terms: `• Do not change account email or password
+• 100% replacement warranty for 12 months`,
+    codes: []
+  },
+  {
+    id: "expressvpn",
+    name: "EXPRESSVPN",
+    category: "standard",
+    price: 1.35,
+    stock: 280,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 1.35 },
+      { min: 21, max: 999999, price: 1.15 }
+    ],
+    description: `🛡️ ExpressVPN Premium (105 Countries • Lightway High-Speed Protocol)
+⏳ Validity: 1 Month (30 Days Full Warranty)
+🔐 Support: PC, Mac, iOS, Android & Browser (Login + Activation Key)
+⚡ Delivery: Instant Automated Account Delivery`,
+    terms: `• Full 30-day warranty included
+• Instant automated login & activation key`,
+    codes: []
+  },
+  {
+    id: "hma_vpn",
+    name: "HMA VPN",
+    category: "standard",
+    price: 0.74,
+    stock: 310,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 30, price: 0.74 },
+      { min: 31, max: 999999, price: 0.62 }
+    ],
+    description: `🛡️ HMA (HideMyAss) Pro VPN (290+ Locations Worldwide)
+⏳ Validity: 1 Month Official License Key (Up to 5 Devices)
+🔐 Features: IP Shuffle, Smart Kill Switch & 20 Gbps Servers
+⚡ Delivery: Instant Automated License Key`,
+    terms: `• Enter license key directly in HMA VPN app
+• Full 30-day warranty`,
+    codes: []
+  },
+  {
+    id: "avira",
+    name: "AVIRA",
+    category: "standard",
+    price: 1.20,
+    stock: 190,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 1.20 },
+      { min: 21, max: 999999, price: 1.00 }
+    ],
+    description: `🛡️ Avira Prime Security + Phantom VPN Pro (Unlimited Traffic)
+⏳ Validity: 3–12 Months Multi-Device Protection
+✨ Features: Real-Time Antivirus, System Optimizer & Unlimited VPN
+⚡ Delivery: Instant Automated Account / License`,
+    terms: `• Works on Windows, macOS, Android & iOS
+• Full period warranty included`,
+    codes: []
+  },
+  {
+    id: "v2ray",
+    name: "V2RAY",
+    category: "standard",
+    price: 1.43,
+    stock: 400,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 30, price: 1.43 },
+      { min: 31, max: 999999, price: 1.20 }
+    ],
+    description: `🌐 Premium V2Ray / VMess / VLESS High-Speed Private Config
+⏳ Validity: 1 Month (30 Days High-Bandwidth Access)
+🚀 Features: Ultra-Low Ping, Bypasses Restrictions & 99.9% Uptime
+⚡ Delivery: Instant Automated Subscription Link / Config`,
+    terms: `• Compatible with v2rayNG, Nekoray, Streisand & Shadowrocket
+• Full 30-day uptime guarantee`,
+    codes: []
+  },
+  {
+    id: "proxy",
+    name: "PROXY",
+    category: "standard",
+    price: 0.15,
+    stock: 1200,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 100, price: 0.15 },
+      { min: 101, max: 999999, price: 0.12 }
+    ],
+    description: `🌐 Clean Dedicated SOCKS5 / HTTP Private Proxy
+⏳ Validity: Fresh High-Speed Static IP (USA / Europe / Global)
+🔐 Features: High Anonymity, Low Fraud Score & Fast Speeds
+⚡ Delivery: Instant Automated (IP:Port:Username:Password)`,
+    terms: `• 100% live tested proxy on delivery
+• Replacement if dead on arrival`,
+    codes: []
+  },
+  {
+    id: "outlook",
+    name: "OUTLOOK",
+    category: "standard",
+    price: 0.03,
+    stock: 3500,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 500, price: 0.03 },
+      { min: 501, max: 999999, price: 0.02 }
+    ],
+    description: `📧 Fresh Verified Microsoft Outlook / Hotmail Account
+🛡️ Status: 100% Active • Webmail & POP3/IMAP Ready
+🔓 Usage: Ideal for Signups, Verifications, Gaming & Bulk Tasks
+⚡ Delivery: Instant Automated (Email:Password)`,
+    terms: `• Fresh unused Outlook/Hotmail credentials
+• Instant automated bulk-ready delivery`,
+    codes: []
+  },
+  {
+    id: "edu_mail",
+    name: "EDU MAIL",
+    category: "standard",
+    price: 1.28,
+    stock: 330,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 25, price: 1.28 },
+      { min: 26, max: 999999, price: 1.10 }
+    ],
+    description: `🎓 Official Verified .EDU Student Email Account
+⏳ Validity: Long-Term Active Student Mailbox
+🎁 Benefits: Unlock Student Discounts on GitHub, JetBrains, Figma, Notion, Autodesk & Prime
+⚡ Delivery: Instant Automated (Email + Password)`,
+    terms: `• Full inbox access for receiving verification codes
+• Guaranteed active on arrival`,
+    codes: []
+  },
+  {
+    id: "usa",
+    name: "USA",
+    category: "standard",
+    price: 1.50,
+    stock: 240,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 1.50 },
+      { min: 21, max: 999999, price: 1.30 }
+    ],
+    description: `🇺🇸 USA Verified Virtual Number / Account Package
+🛡️ Status: Clean US Carrier Profile • High Deliverability
+🔓 Usage: Ideal for US OTP Verifications, Social & App Registrations
+⚡ Delivery: Instant Automated Access Link / Credentials`,
+    terms: `• Clean USA number/account access
+• Instant automated delivery`,
+    codes: []
+  },
+  {
+    id: "youtube",
+    name: "YOUTUBE",
+    category: "standard",
+    price: 1.73,
+    stock: 290,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 20, price: 1.73 },
+      { min: 21, max: 999999, price: 1.50 }
+    ],
+    description: `▶️ YouTube Premium + YouTube Music (100% Ad-Free)
+⏳ Validity: 1 Month Official Subscription
+✨ Features: Background Play, Offline Downloads & 1080p Enhanced Bitrate
+⚡ Delivery: Instant Automated Invite Link / Account`,
+    terms: `• Works on Smart TV, iOS, Android & Web
+• Full 30-day warranty included`,
+    codes: []
+  },
+  {
+    id: "duolingo",
+    name: "DUOLINGO",
+    category: "standard",
+    price: 0.42,
+    stock: 450,
+    outOfStock: false,
+    bulk_tiers: [
+      { min: 1, max: 50, price: 0.42 },
+      { min: 51, max: 999999, price: 0.35 }
+    ],
+    description: `🦉 Duolingo Super Official Subscription (40+ Languages)
+⏳ Validity: 12 Months (Full Period Guarantee)
+✨ Features: Unlimited Hearts, Mistake Review, Practice Hub & Zero Ads
+⚡ Delivery: Instant Automated Activation / Account`,
+    terms: `• Non-refundable once activated
+• Full period replacement warranty`,
+    codes: []
+  },
+
   // ==========================================
   // AI API KEYS & CLOUD TOKENS (category: "api_key")
   // ==========================================
@@ -201,10 +1168,7 @@ const defaultProducts = [
     price: 2.50,
     stock: 300,
     outOfStock: false,
-    bulk_tiers: [
-      { min: 1, max: 10, price: 2.50 },
-      { min: 11, max: 999999, price: 2.00 }
-    ],
+    bulk_tiers: buildBulkTiers(2.50),
     description: `✅ Official DeepSeek V3 & R1 Reasoning API Key
 ⚡️ Ultra-low latency, OpenAI compatible • Instant delivery`,
     terms: `• Instant automated token delivery
@@ -212,6 +1176,11 @@ const defaultProducts = [
     codes: []
   }
 ];
+
+// Ensure every default product has progressive bulk discount tiers (5+ = 10% OFF up to 100+ = 30% OFF)
+for (const dp of defaultProducts) {
+  dp.bulk_tiers = buildBulkTiers(dp.price);
+}
 
 const defaults = {
   settings: defaultSettings,
@@ -249,20 +1218,70 @@ function normalizeDb(raw) {
     }
   }
 
+  if (!Array.isArray(raw.settings.deleted_product_ids)) {
+    raw.settings.deleted_product_ids = [];
+  }
+  const deletedSet = new Set(raw.settings.deleted_product_ids.map(String));
+
+  // Filter out obsolete placeholder products and admin-deleted products
+  raw.products = raw.products.filter(
+    p => p && p.id && !LEGACY_REMOVED_IDS.has(String(p.id)) && !deletedSet.has(String(p.id))
+  );
+
   for (const defP of defaultProducts) {
+    if (deletedSet.has(String(defP.id))) continue;
     const existing = raw.products.find(p => String(p.id) === String(defP.id));
     if (!existing) {
-      raw.products.push(defP);
+      raw.products.push(structuredClone(defP));
     } else {
       if (!existing.category) existing.category = defP.category || "standard";
-      if (existing.description === undefined || existing.description.length > 150) {
+      if (existing.group === undefined && defP.group) existing.group = defP.group;
+      if (!existing.admin_modified) {
+        if (String(existing.id) === "gemini_18m" && (existing.name === "Gemini Links 18M" || existing.price === 0.55)) {
+          existing.name = defP.name;
+          existing.group = defP.group;
+          existing.price = defP.price;
+          existing.description = defP.description;
+          existing.bulk_tiers = buildBulkTiers(defP.price);
+        }
+        if (String(existing.id) === "gemini_12m_acc" && existing.price === 1.20) {
+          existing.price = defP.price;
+          existing.description = defP.description;
+          existing.bulk_tiers = buildBulkTiers(defP.price);
+        }
+        if (String(existing.id) === "gmail_plan_1" && existing.price === 0.18) {
+          existing.price = defP.price;
+          existing.description = defP.description;
+          existing.bulk_tiers = buildBulkTiers(defP.price);
+        }
+        if (String(existing.id) === "gmail_plan_2" && (String(existing.name).includes("Phone-Verified") || String(existing.name).includes("PVA"))) {
+          existing.name = defP.name;
+          existing.description = defP.description;
+          existing.bulk_tiers = buildBulkTiers(defP.price);
+        }
+      }
+      if (existing.description === undefined || existing.description === "") {
         existing.description = defP.description;
       }
-      if (existing.terms === undefined) existing.terms = defP.terms;
+      if (existing.terms === undefined || existing.terms === "") existing.terms = defP.terms;
       if (existing.price === undefined) existing.price = defP.price;
-      if (existing.bulk_tiers === undefined) existing.bulk_tiers = defP.bulk_tiers;
     }
   }
+
+  // Ensure every product has the progressive bulk discount tiers (5+ = 10% OFF, 10+ = 15% OFF, 25+ = 20% OFF, 50+ = 25% OFF, 100+ = 30% OFF)
+  for (const prod of raw.products) {
+    if (!Array.isArray(prod.bulk_tiers) || !prod.bulk_tiers.some(t => t.min === 5 && t.discount_pct === 10)) {
+      prod.bulk_tiers = buildBulkTiers(prod.price);
+    }
+  }
+
+  // Keep defaultProducts order first, followed by any custom products added by admin
+  const orderMap = new Map(defaultProducts.map((p, idx) => [String(p.id), idx]));
+  raw.products.sort((a, b) => {
+    const idxA = orderMap.has(String(a.id)) ? orderMap.get(String(a.id)) : 9999;
+    const idxB = orderMap.has(String(b.id)) ? orderMap.get(String(b.id)) : 9999;
+    return idxA - idxB;
+  });
 
   // Ensure channel_posts is populated with at least the 85+ default posts
   if (!Array.isArray(raw.channel_posts) || raw.channel_posts.length === 0) {
@@ -349,9 +1368,7 @@ async function initStore() {
       listenFirebaseData((remoteUpdated) => {
         if (remoteUpdated) {
           memoryDb = normalizeDb(remoteUpdated);
-          try {
-            fs.writeFileSync(file, JSON.stringify(memoryDb, null, 2), "utf8");
-          } catch (e) {}
+          scheduleLocalWrite(memoryDb, 500);
         }
       });
       return memoryDb;
@@ -373,15 +1390,60 @@ function load() {
   return memoryDb;
 }
 
-function save(db) {
-  memoryDb = db;
-  try {
-    fs.writeFileSync(file, JSON.stringify(db, null, 2), "utf8");
-  } catch (e) {
-    console.error("Local file write error:", e.message);
+// Asynchronous, non-blocking debounced disk writer to prevent event-loop hangs
+let localWriteTimer = null;
+let isWritingToDisk = false;
+let pendingWriteAfterCurrent = false;
+
+async function flushLocalDiskAsync() {
+  if (!memoryDb) return;
+  if (isWritingToDisk) {
+    pendingWriteAfterCurrent = true;
+    return;
   }
+  isWritingToDisk = true;
+  try {
+    const payload = JSON.stringify(memoryDb, null, 2);
+    await fs.promises.writeFile(file, payload, "utf8");
+  } catch (e) {
+    console.error("Local async file write error:", e.message);
+  } finally {
+    isWritingToDisk = false;
+    if (pendingWriteAfterCurrent) {
+      pendingWriteAfterCurrent = false;
+      setImmediate(flushLocalDiskAsync);
+    }
+  }
+}
+
+function scheduleLocalWrite(db, delayMs = 250) {
+  memoryDb = db;
+  if (localWriteTimer) clearTimeout(localWriteTimer);
+  localWriteTimer = setTimeout(() => {
+    localWriteTimer = null;
+    flushLocalDiskAsync();
+  }, delayMs);
+}
+
+function flushStoreSync() {
+  if (localWriteTimer) {
+    clearTimeout(localWriteTimer);
+    localWriteTimer = null;
+  }
+  if (!memoryDb) return;
+  try {
+    fs.writeFileSync(file, JSON.stringify(memoryDb, null, 2), "utf8");
+  } catch (e) {
+    console.error("Final sync flush error:", e.message);
+  }
+}
+
+function save(db, options = {}) {
+  memoryDb = db;
+  const delayMs = options.lightweight ? 2500 : 200;
+  scheduleLocalWrite(db, delayMs);
   if (isFirebaseConfigured()) {
-    saveFirebaseData(db);
+    saveFirebaseData(db, options.lightweight ? 2500 : 400);
   }
 }
 
@@ -426,13 +1488,20 @@ function updateProduct(id, fields) {
   const db = load();
   const idx = db.products.findIndex(p => String(p.id) === String(id));
   if (idx === -1) throw new Error("Product not found");
-  db.products[idx] = { ...db.products[idx], ...fields };
+  const updatedFields = { ...fields, admin_modified: true };
+  if (updatedFields.price !== undefined && updatedFields.bulk_tiers === undefined) {
+    updatedFields.bulk_tiers = buildBulkTiers(updatedFields.price);
+  }
+  db.products[idx] = { ...db.products[idx], ...updatedFields };
   save(db);
   return db.products[idx];
 }
 
 function addProduct(product) {
   const db = load();
+  if (!Array.isArray(product.bulk_tiers) || !product.bulk_tiers.some(t => t.min === 5)) {
+    product.bulk_tiers = buildBulkTiers(product.price);
+  }
   db.products.push(product);
   save(db);
   return product;
@@ -443,25 +1512,49 @@ function deleteProduct(id) {
   const idx = db.products.findIndex(p => String(p.id) === String(id));
   if (idx === -1) return false;
   db.products.splice(idx, 1);
+  if (!Array.isArray(db.settings.deleted_product_ids)) {
+    db.settings.deleted_product_ids = [];
+  }
+  const strId = String(id);
+  if (!db.settings.deleted_product_ids.includes(strId)) {
+    db.settings.deleted_product_ids.push(strId);
+  }
   save(db);
   return true;
 }
 
 function calculateProductPrice(product, quantity) {
   const qty = Math.max(1, Number(quantity) || 1);
-  if (Array.isArray(product.bulk_tiers) && product.bulk_tiers.length > 0) {
-    for (const tier of product.bulk_tiers) {
-      if (qty >= tier.min && qty <= tier.max) {
-        return {
-          unitPrice: Number(tier.price),
-          totalPrice: Number((tier.price * qty).toFixed(2))
-        };
-      }
+  const basePrice = Number(product.price) || 0;
+  const originalTotal = Number((basePrice * qty).toFixed(2));
+  const tiers = (Array.isArray(product.bulk_tiers) && product.bulk_tiers.some(t => t.min === 5))
+    ? product.bulk_tiers
+    : buildBulkTiers(basePrice);
+
+  for (const tier of tiers) {
+    if (qty >= tier.min && qty <= tier.max) {
+      const discountPct = Number(tier.discount_pct || 0);
+      const unitPrice = Number(tier.price);
+      const rawDiscountedTotal = discountPct > 0
+        ? basePrice * qty * (1 - discountPct / 100)
+        : unitPrice * qty;
+      const totalPrice = Math.max(0.01, Number(rawDiscountedTotal.toFixed(2)));
+      const savedAmount = Number(Math.max(0, originalTotal - totalPrice).toFixed(2));
+      return {
+        unitPrice,
+        totalPrice,
+        discountPct,
+        originalTotal,
+        savedAmount
+      };
     }
   }
   return {
-    unitPrice: Number(product.price),
-    totalPrice: Number((product.price * qty).toFixed(2))
+    unitPrice: basePrice,
+    totalPrice: originalTotal,
+    discountPct: 0,
+    originalTotal,
+    savedAmount: 0
   };
 }
 
@@ -671,21 +1764,26 @@ function recordUserMessageId(userId, messageId) {
       api_key: `ak_${crypto.randomBytes(16).toString("hex")}`,
       created_at: new Date().toISOString()
     };
-    save(db);
+    save(db, { lightweight: true });
     return;
   }
   const u = db.users[idStr];
   if (!Array.isArray(u.sent_message_ids)) u.sent_message_ids = [];
+  let changed = false;
   if (!u.sent_message_ids.includes(msgId)) {
     u.sent_message_ids.push(msgId);
-    if (u.sent_message_ids.length > 500) {
-      u.sent_message_ids = u.sent_message_ids.slice(-500);
+    if (u.sent_message_ids.length > 150) {
+      u.sent_message_ids = u.sent_message_ids.slice(-150);
     }
+    changed = true;
   }
   if (!u.last_message_id || msgId > u.last_message_id) {
     u.last_message_id = msgId;
+    changed = true;
   }
-  save(db);
+  if (changed) {
+    save(db, { lightweight: true });
+  }
 }
 
 function recordUserLastSeenMessageId(userId, messageId) {
@@ -697,7 +1795,7 @@ function recordUserLastSeenMessageId(userId, messageId) {
   if (!u) return;
   if (!u.last_message_id || msgId > u.last_message_id) {
     u.last_message_id = msgId;
-    save(db);
+    save(db, { lightweight: true });
   }
 }
 
@@ -1163,6 +2261,7 @@ function updateTicketStatus(ticketId, status) {
 
 module.exports = {
   initStore,
+  flushStoreSync,
   getSetting,
   getAllSettings,
   setSetting,
@@ -1173,6 +2272,7 @@ module.exports = {
   updateProduct,
   addProduct,
   deleteProduct,
+  buildBulkTiers,
   calculateProductPrice,
   addProductCodes,
   dispenseProductCodes,

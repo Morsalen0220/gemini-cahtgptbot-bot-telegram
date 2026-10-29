@@ -93,20 +93,24 @@ async function fetchFirebaseData() {
 
 // Save all bot data to Firebase
 let syncTimeout = null;
-function saveFirebaseData(data) {
+let ignoreRemoteUntil = 0;
+
+function saveFirebaseData(data, delayMs = 400) {
   const db = initFirebase();
   if (!db) return;
 
-  // Debounce writes slightly (200ms) to coalesce rapid sequential updates
+  // Debounce writes to coalesce rapid sequential updates and prevent network saturation
   if (syncTimeout) clearTimeout(syncTimeout);
 
   syncTimeout = setTimeout(async () => {
+    syncTimeout = null;
     try {
+      ignoreRemoteUntil = Date.now() + 3000;
       await db.ref("botData").set(data);
     } catch (err) {
       console.error("Error saving to Firebase:", err.message);
     }
-  }, 200);
+  }, delayMs);
 }
 
 // Listen to real-time changes made directly in Firebase Console
@@ -115,6 +119,8 @@ function listenFirebaseData(callback) {
   if (!db || typeof callback !== "function") return;
 
   db.ref("botData").on("value", (snapshot) => {
+    // Ignore self-triggered echoes right after our own saveFirebaseData call
+    if (Date.now() < ignoreRemoteUntil) return;
     if (snapshot.exists()) {
       callback(snapshot.val());
     }

@@ -7,6 +7,7 @@ const express = require("express");
 
 const {
   initStore,
+  flushStoreSync,
   getSetting,
   getAllSettings,
   setSetting,
@@ -17,6 +18,7 @@ const {
   updateProduct,
   addProduct,
   deleteProduct,
+  buildBulkTiers,
   calculateProductPrice,
   addProductCodes,
   dispenseProductCodes,
@@ -80,15 +82,86 @@ if (!ADMIN_ID) {
 
 const https = require("https");
 
+// Prevent stray unhandled promise rejections or network glitches from crashing or freezing the bot
+process.on("unhandledRejection", (reason) => {
+  console.error("[Anti-Hang Guard] Unhandled Promise Rejection:", reason?.message || reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[Anti-Hang Guard] Uncaught Exception:", err?.message || err);
+});
+
 const agent = new https.Agent({
   keepAlive: true,
   keepAliveMsecs: 10000,
-  timeout: 30000
+  maxSockets: 100,
+  maxFreeSockets: 20,
+  timeout: 25000
 });
 
 const bot = new Telegraf(TOKEN, {
+  handlerTimeout: 30000,
   telegram: { agent }
 });
+
+// =====================================================
+// NON-BLOCKING CONCURRENT UPDATE DISPATCHER (PER-USER QUEUE)
+// Ensures 1 slow user or admin action NEVER blocks or hangs other users!
+// =====================================================
+const rawHandleUpdate = bot.handleUpdate.bind(bot);
+const userUpdateQueues = new Map();
+
+function withTimeout(promise, ms, label = "Operation") {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+}
+
+bot.handleUpdate = function (update, webhookResponse) {
+  // If running in webhook mode with an immediate HTTP response stream, let Telegraf handle it
+  if (webhookResponse) {
+    return rawHandleUpdate(update, webhookResponse);
+  }
+
+  const userId =
+    update?.message?.from?.id ||
+    update?.callback_query?.from?.id ||
+    update?.edited_message?.from?.id ||
+    update?.inline_query?.from?.id ||
+    update?.my_chat_member?.from?.id;
+
+  const queueKey = userId ? String(userId) : "global";
+
+  // Dispatch asynchronously so Telegraf's polling loop immediately fetches the next update without waiting!
+  const prevTask = userUpdateQueues.get(queueKey) || Promise.resolve();
+  const nextTask = prevTask
+    .then(() => withTimeout(rawHandleUpdate(update), 28000, `Update ${update?.update_id}`))
+    .catch((err) => {
+      console.error(`[Dispatcher Error] update_id=${update?.update_id}:`, err?.message || err);
+    })
+    .finally(() => {
+      if (userUpdateQueues.get(queueKey) === nextTask) {
+        userUpdateQueues.delete(queueKey);
+      }
+    });
+
+  userUpdateQueues.set(queueKey, nextTask);
+  return Promise.resolve();
+};
+
+let cachedBotUsername = null;
+async function getCachedBotUsername() {
+  if (cachedBotUsername) return cachedBotUsername;
+  try {
+    const info = await withTimeout(rawCallApi("getMe", {}), 8000, "getMe");
+    if (info && info.username) {
+      cachedBotUsername = info.username;
+      return cachedBotUsername;
+    }
+  } catch (_) {}
+  return "aibuyshop_bot";
+}
 
 bot.catch((err, ctx) => {
   console.error(`[Telegraf Error] update_id=${ctx?.update?.update_id}:`, err.message || err);
@@ -106,7 +179,7 @@ bot.use((ctx, next) => {
 });
 
 // =====================================================
-// OUTGOING API INTERCEPTOR & MESSAGE TRACKING / BLOCK GUARD
+// OUTGOING API INTERCEPTOR, TIMEOUT GUARD & MESSAGE TRACKING
 // =====================================================
 const rawCallApi = bot.telegram.callApi.bind(bot.telegram);
 
@@ -156,9 +229,29 @@ bot.telegram.callApi = async function (method, payload = {}, ...rest) {
     delete cleanPayload._allowWhenBlocked;
   }
 
-  const res = await rawCallApi(method, cleanPayload, ...rest);
+  // Timeout guard (22s) + automatic retry on transient network reset or short 429 flood-wait
+  let res;
+  try {
+    res = await withTimeout(rawCallApi(method, cleanPayload, ...rest), 22000, `Telegram API ${method}`);
+  } catch (err) {
+    const retryAfter = err?.parameters?.retry_after;
+    if (retryAfter && retryAfter <= 5) {
+      await new Promise((r) => setTimeout(r, retryAfter * 1000));
+      res = await withTimeout(rawCallApi(method, cleanPayload, ...rest), 22000, `Telegram API ${method} retry`);
+    } else if (
+      err?.code === "ECONNRESET" ||
+      err?.code === "ETIMEDOUT" ||
+      err?.code === "EAI_AGAIN" ||
+      err?.code === "EPIPE"
+    ) {
+      await new Promise((r) => setTimeout(r, 400));
+      res = await withTimeout(rawCallApi(method, cleanPayload, ...rest), 22000, `Telegram API ${method} net-retry`);
+    } else {
+      throw err;
+    }
+  }
 
-  // Record every message_id sent by the bot to a customer so it can be deleted if they are blocked
+  // Record every message_id sent by the bot to a customer (lightweight debounced save in RAM)
   if (isCustomerTarget && res) {
     if (typeof res.message_id === "number" && res.message_id > 0) {
       recordUserMessageId(targetChatId, res.message_id);
@@ -565,31 +658,242 @@ bot.use(async (ctx, next) => {
 });
 
 // =====================================================
-// MAIN MENU HANDLERS
+// MAIN MENU & SLASH COMMAND HANDLERS ("/" MENU)
 // =====================================================
+const PUBLIC_BOT_COMMANDS = [
+  { command: "start", description: "🏠 Start Bot & Main Menu" },
+  { command: "buy", description: "🛍️ Browse Products & Plans" },
+  { command: "wallet", description: "👛 Check Wallet Balance & History" },
+  { command: "deposit", description: "💳 Add Funds (Binance Pay / USDT)" },
+  { command: "orders", description: "💰 View My Purchased Orders" },
+  { command: "recover", description: "🗑️ Recover Order by Order Code" },
+  { command: "refer", description: "📌 Refer Friends & Claim Free Gemini" },
+  { command: "apikey", description: "🆙 Buy AI API Keys & Cloud Tokens" },
+  { command: "support", description: "💬 24/7 Support Desk & Warranty" },
+  { command: "ticket", description: "🎫 Open Support / Replacement Ticket" },
+  { command: "profile", description: "📰 My Account Profile & Stats" },
+  { command: "help", description: "❓ How to Buy, Bulk Discounts & FAQ" },
+  { command: "cancel", description: "❎ Cancel Current Action" }
+];
+
+const ADMIN_EXTRA_COMMANDS = [
+  { command: "admin", description: "🔐 Open Admin Control Panel" },
+  { command: "products", description: "🛍️ Manage Products, Plans & Prices" },
+  { command: "deposits", description: "📥 Review Pending Wallet Deposits" },
+  { command: "tickets", description: "🎫 View & Reply to Support Tickets" },
+  { command: "customers", description: "👥 Customer List & Direct Message" },
+  { command: "broadcast", description: "📢 Broadcast Message to All Users" },
+  { command: "pinall", description: "📌 Broadcast & Pin to All Users" },
+  { command: "unpinall", description: "🗑️ Remove All Old Pinned Messages" },
+  { command: "block", description: "🚫 Block User & Purge Messages" },
+  { command: "unblock", description: "🟢 Unblock User by ID / @username" }
+];
+
+async function registerBotCommands() {
+  try {
+    await bot.telegram.setMyCommands(PUBLIC_BOT_COMMANDS);
+    await bot.telegram.setMyCommands(PUBLIC_BOT_COMMANDS, {
+      scope: { type: "all_private_chats" }
+    });
+    if (/^\d+$/.test(ADMIN_ID)) {
+      await bot.telegram.setMyCommands(
+        [...ADMIN_EXTRA_COMMANDS, ...PUBLIC_BOT_COMMANDS],
+        { scope: { type: "chat", chat_id: Number(ADMIN_ID) } }
+      ).catch(() => {});
+    }
+    await bot.telegram.setChatMenuButton({
+      menu_button: { type: "commands" }
+    }).catch(() => {});
+    console.log("✅ Registered Telegram '/' slash commands menu successfully!");
+  } catch (err) {
+    console.error("Failed to register Telegram slash commands:", err.message || err);
+  }
+}
+
 bot.hears("🛍️ Buy", (ctx) => showCatalog(ctx));
+bot.command(["buy", "shop", "catalog"], (ctx) => {
+  clearAdminConflictingSession(ctx);
+  return showCatalog(ctx);
+});
 bot.action("menu:buy", (ctx) => showCatalog(ctx));
 
 bot.hears("💰 My Orders", (ctx) => showMyOrders(ctx));
+bot.command(["orders", "myorders"], (ctx) => {
+  clearAdminConflictingSession(ctx);
+  return showMyOrders(ctx);
+});
 bot.action("menu:orders", (ctx) => showMyOrders(ctx));
 
 bot.hears("👛 Wallet", (ctx) => showWallet(ctx));
+bot.command(["wallet", "balance"], (ctx) => {
+  clearAdminConflictingSession(ctx);
+  return showWallet(ctx);
+});
 bot.action("menu:wallet", (ctx) => showWallet(ctx));
 
+bot.command(["deposit", "addfunds", "topup"], async (ctx) => {
+  clearAdminConflictingSession(ctx);
+  const settings = getAllSettings();
+  const minCrypto = Number(settings.min_crypto_deposit || 1.00);
+  const text = `💳 <b>SELECT DEPOSIT METHOD</b>
+━━━━━━━━━━━━━━━━━━━
+Please choose your preferred deposit gateway:
+• <b>Binance Pay:</b> Binance ID / Pay ID (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)
+• <b>USDT (BEP20):</b> BNB Smart Chain (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)
+• <b>USDT (Polygon):</b> Polygon / POL (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)`;
+
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("🟡 Binance Pay (Binance ID)", `deposit:binance:${minCrypto}`)],
+    [Markup.button.callback("🟡 USDT (BEP20 / BSC)", `deposit:bep20:${minCrypto}`)],
+    [Markup.button.callback("🟣 USDT (Polygon / POL)", `deposit:polygon:${minCrypto}`)],
+    [Markup.button.callback("🔙 Back to Wallet", "menu:wallet")]
+  ]);
+  return ctx.reply(text, { parse_mode: "HTML", ...buttons });
+});
+
 bot.hears("📰 Profile", (ctx) => showProfile(ctx));
+bot.command("profile", (ctx) => {
+  clearAdminConflictingSession(ctx);
+  return showProfile(ctx);
+});
 bot.action("menu:profile", (ctx) => showProfile(ctx));
 
 bot.hears("🗑️ Recover", (ctx) => promptRecover(ctx));
+bot.command("recover", (ctx) => {
+  clearAdminConflictingSession(ctx);
+  return promptRecover(ctx);
+});
 bot.action("menu:recover", (ctx) => promptRecover(ctx));
 
 bot.hears("📌 Refer & Earn", (ctx) => showRefer(ctx));
+bot.command(["refer", "referral", "invite"], (ctx) => {
+  clearAdminConflictingSession(ctx);
+  return showRefer(ctx);
+});
 bot.action("menu:refer", (ctx) => showRefer(ctx));
 
 bot.hears("💬 Support", (ctx) => showSupport(ctx));
+bot.command("support", (ctx) => {
+  clearAdminConflictingSession(ctx);
+  return showSupport(ctx);
+});
 bot.action("menu:support", (ctx) => showSupport(ctx));
 
+bot.command("ticket", (ctx) => {
+  clearAdminConflictingSession(ctx);
+  const text = `🎫 <b>OPEN NEW SUPPORT TICKET</b>
+━━━━━━━━━━━━━━━━━━━━
+Please select the category that best describes your issue:`;
+
+  const buttons = Markup.inlineKeyboard([
+    [Markup.button.callback("🔄 Order Replacement / Warranty", "ticket:cat:Replacement")],
+    [Markup.button.callback("💳 Deposit / Balance Issue", "ticket:cat:Deposit")],
+    [Markup.button.callback("🔑 Account / Redeem Link Help", "ticket:cat:Product")],
+    [Markup.button.callback("💬 General Question", "ticket:cat:General")],
+    [Markup.button.callback("🔙 Back to Support", "menu:support")]
+  ]);
+  return ctx.reply(text, { parse_mode: "HTML", ...buttons });
+});
+
 bot.hears("🆙 API Key", (ctx) => showApiKey(ctx));
+bot.command(["apikey", "api"], (ctx) => {
+  clearAdminConflictingSession(ctx);
+  return showApiKey(ctx);
+});
 bot.action("menu:apikey", (ctx) => showApiKey(ctx));
+
+bot.command("help", async (ctx) => {
+  clearAdminConflictingSession(ctx);
+  const text = `❓ <b>HOW TO USE THIS BOT & FAQ</b>
+━━━━━━━━━━━━━━━━━━━━
+🛍️ <b>1. Instant Shopping (<code>/buy</code>)</b>
+• Browse Multi-Plan categories (Gemini, Claude AI, ChatGPT, CapCut, Canva, Gmail, Autodesk, Muse) or 28+ direct subscriptions.
+• Delivery is <b>100% instant & automated</b> once paid from your wallet.
+
+🔥 <b>2. Progressive Bulk Discounts</b>
+• Buy <b>5 – 9 pcs</b> ➔ <b>10% OFF</b> on every item
+• Buy <b>10 – 24 pcs</b> ➔ <b>15% OFF</b> on every item
+• Buy <b>25 – 49 pcs</b> ➔ <b>20% OFF</b> on every item
+• Buy <b>50 – 99 pcs</b> ➔ <b>25% OFF</b> on every item
+• Buy <b>100+ pcs</b> ➔ <b>30% OFF</b> on every item
+
+💳 <b>3. Wallet Deposit (<code>/deposit</code>)</b>
+• Top up anytime via <b>Binance Pay</b>, <b>USDT (BEP20)</b>, or <b>USDT (Polygon)</b>.
+
+🎁 <b>4. Refer & Earn (<code>/refer</code>)</b>
+• Invite 30 friends to unlock <b>1 FREE Gemini Advanced 18M</b> subscription + earn commission on deposits!
+
+🎫 <b>5. 24/7 Support & Warranty (<code>/ticket</code>)</b>
+• Every product includes replacement warranty. Open a ticket anytime for fast assistance.`;
+
+  return ctx.reply(text, {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback("🛍️ Browse Products", "menu:buy"), Markup.button.callback("💳 Deposit Funds", "deposit:start")],
+      [Markup.button.callback("🎫 Open Support Ticket", "ticket:new"), Markup.button.callback("🏠 Main Menu", "menu:main")]
+    ])
+  });
+});
+
+// Admin quick slash commands
+bot.command("products", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  clearAdminConflictingSession(ctx);
+  return showAdminProductsMenu(ctx);
+});
+
+bot.command("deposits", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  clearAdminConflictingSession(ctx);
+  const list = getPendingDeposits();
+  if (list.length === 0) {
+    return ctx.reply("✅ No pending deposits.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Admin Menu", "adm:menu")]]));
+  }
+  const buttons = list.slice(0, 10).map((d) => [
+    Markup.button.callback(`🔍 ${d.id} • ${money(d.amount)} (${d.user_name})`, `adm_view_dep:${d.id}`)
+  ]);
+  buttons.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
+  return ctx.reply(`📥 PENDING DEPOSITS (${list.length}):`, Markup.inlineKeyboard(buttons));
+});
+
+bot.command("tickets", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  clearAdminConflictingSession(ctx);
+  const openList = getOpenTickets();
+  const allList = getAllTickets();
+  const displayList = openList.length > 0 ? openList : allList.slice(0, 10);
+  if (displayList.length === 0) {
+    return ctx.reply("✅ No support tickets found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Admin Menu", "adm:menu")]]));
+  }
+  const buttons = displayList.slice(0, 12).map((t) => {
+    const icon = t.status === "open" ? "🟢" : t.status === "replied" ? "💬" : "✅";
+    return [Markup.button.callback(`${icon} #${t.id} — ${t.user_name} (${t.category.replace(/^[^\s]+\s/, "")})`, `adm_tkt_view:${t.id}`)];
+  });
+  buttons.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
+  return ctx.reply(`🎫 <b>SUPPORT TICKETS (${displayList.length})</b>\nSelect a ticket below:`, {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard(buttons)
+  });
+});
+
+bot.command("customers", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  clearAdminConflictingSession(ctx);
+  return ctx.reply(
+    "👥 Tap below to open the Customer Directory & Direct Messaging panel:",
+    Markup.inlineKeyboard([[Markup.button.callback("👥 Open Customers Directory", "adm:customers:0")]])
+  );
+});
+
+bot.command("broadcast", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  clearAdminConflictingSession(ctx);
+  ctx.session.adminAction = { type: "broadcast" };
+  return ctx.reply(
+    "📢 Send the message you want to broadcast to all registered active bot users:\n\nSend /cancel to cancel.",
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:menu")]])
+  );
+});
 
 bot.action("menu:main", async (ctx) => {
   await ctx.answerCbQuery();
@@ -598,85 +902,200 @@ bot.action("menu:main", async (ctx) => {
 });
 
 // =====================================================
-// CATALOG / BUY FLOW
+// CATALOG / BUY FLOW (MULTI-PLAN GROUPS & SINGLE ITEMS)
 // =====================================================
+function pairButtons(btnArray, perRow = 2) {
+  const rows = [];
+  for (let i = 0; i < btnArray.length; i += perRow) {
+    rows.push(btnArray.slice(i, i + perRow));
+  }
+  return rows;
+}
+
 async function showCatalog(ctx) {
   if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
   const products = getStandardProducts();
-  const text = `Pick a product below — price and live stock are shown on each button.
-⚡️ Delivery is instant once payment clears.`;
+  const text = `🛍️ <b>AVAILABLE PRODUCTS & PLANS</b>
+━━━━━━━━━━━━━━━━━━━
+Select a category or product below — multi-plan packages and live prices are shown on each button.
+🔥 <b>Bulk Discount:</b> Buy <b>5+</b> items to get <b>10% OFF</b> — up to <b>30% OFF</b> on bigger orders!
+⚡️ <i>Delivery is instant & automated once payment clears.</i>`;
 
-  const buttons = products.map((p) => {
+  // Group multi-plan products by their `group` field in catalog order
+  const groupMap = new Map();
+  const singleProducts = [];
+
+  for (const p of products) {
+    const grp = p.group ? String(p.group).trim() : "";
+    if (grp) {
+      if (!groupMap.has(grp)) groupMap.set(grp, []);
+      groupMap.get(grp).push(p);
+    } else {
+      singleProducts.push(p);
+    }
+  }
+
+  const groupButtons = [];
+  for (const [grpName, plans] of groupMap.entries()) {
+    const planWord = plans.length === 1 ? "Plan" : "Plans";
+    const label = `${grpName} ▸ ${plans.length} ${planWord} »`;
+    groupButtons.push(Markup.button.callback(label, `grp:${grpName}`));
+  }
+
+  const singleButtons = singleProducts.map((p) => {
     let label;
     if (p.outOfStock || p.stock <= 0) {
-      label = `${p.name} • Out of stock`;
+      label = `${p.name} • Out`;
     } else {
-      label = `${p.name} • ${money(p.price)} | Stock: ${p.stock}`;
+      label = `${p.name} $${Number(p.price || 0).toFixed(2)}`;
     }
-    return [Markup.button.callback(label, `prod:${p.id}`)];
+    return Markup.button.callback(label, `prod:${p.id}`);
   });
 
-  buttons.push([Markup.button.callback("🔙 Go Back", "menu:main")]);
+  const rows = [
+    ...pairButtons(groupButtons, 2),
+    ...pairButtons(singleButtons, 2),
+    [Markup.button.callback("🔙 Go Back", "menu:main")]
+  ];
+
+  const keyboard = Markup.inlineKeyboard(rows);
 
   if (ctx.callbackQuery) {
     try {
-      await ctx.editMessageText(text, Markup.inlineKeyboard(buttons));
+      await ctx.editMessageText(text, { parse_mode: "HTML", ...keyboard });
       return;
     } catch (e) {}
   }
-  await ctx.reply(text, Markup.inlineKeyboard(buttons));
+  await ctx.reply(text, { parse_mode: "HTML", ...keyboard });
 }
 
-// Product clicked -> Show Bulk Discount & Quantity
+// Multi-Plan Group clicked -> Show all plans inside that group
+bot.action(/^grp:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const groupName = ctx.match[1];
+  await showGroupPlans(ctx, groupName);
+});
+
+async function showGroupPlans(ctx, groupName) {
+  const plans = getStandardProducts().filter(
+    (p) => p.group && String(p.group).trim().toLowerCase() === String(groupName).trim().toLowerCase()
+  );
+
+  if (plans.length === 0) {
+    return showCatalog(ctx);
+  }
+
+  const displayGroup = plans[0].group || groupName;
+  let text = `📂 <b>${escapeHtml(displayGroup.toUpperCase())} — AVAILABLE PLANS (${plans.length})</b>\n━━━━━━━━━━━━━━━━━━━\n`;
+
+  plans.forEach((plan, idx) => {
+    const statusText = (plan.outOfStock || plan.stock <= 0)
+      ? "🚫 Out of stock"
+      : `✅ Stock: ${plan.stock}`;
+    const firstLineDesc = String(plan.description || "").split("\n")[0] || "";
+    text += `\n<b>${idx + 1}. ${escapeHtml(plan.name)}</b> — <b>$${Number(plan.price).toFixed(2)}</b> (${statusText})\n<i>${escapeHtml(firstLineDesc)}</i>\n`;
+  });
+
+  text += `\n🔥 <b>Bulk Offer:</b> Buy 5+ for <b>10% OFF</b> • 10+ for <b>15% OFF</b> • Up to <b>30% OFF</b>!\n👇 <b>Select a plan below to view full details & purchase:</b>`;
+
+  const buttons = plans.map((plan) => {
+    let label;
+    if (plan.outOfStock || plan.stock <= 0) {
+      label = `${plan.name} • Out of stock`;
+    } else {
+      label = `${plan.name} • $${Number(plan.price).toFixed(2)} | Stock: ${plan.stock}`;
+    }
+    return [Markup.button.callback(label, `prod:${plan.id}`)];
+  });
+
+  buttons.push([Markup.button.callback("🔙 Back to Catalog", "menu:buy")]);
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+      return;
+    } catch (e) {}
+  }
+  await ctx.reply(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+}
+
+// Product or Plan clicked -> Show Clean Description, Bulk Discount & Quantity Selector
 bot.action(/^prod:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const productId = ctx.match[1];
   const p = getProduct(productId);
-  const backMenu = p && p.category === "api_key" ? "menu:apikey" : "menu:buy";
+  const backMenu = p && p.category === "api_key"
+    ? "menu:apikey"
+    : (p && p.group ? `grp:${p.group}` : "menu:buy");
+  const backLabel = p && p.category === "api_key"
+    ? "🔙 Back to API Keys"
+    : (p && p.group ? `🔙 Back to ${p.group} Plans` : "🔙 Back to Catalog");
 
   if (!p) {
-    return ctx.reply("❌ Product not found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Catalog", backMenu)]]));
+    return ctx.reply("❌ Product not found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Catalog", "menu:buy")]]));
   }
 
   if (p.outOfStock || p.stock <= 0) {
     return ctx.reply(
-      `⚠️ ${p.name} is currently out of stock.\nPlease check back later or choose another item.`,
-      Markup.inlineKeyboard([[Markup.button.callback("🔙 Back", backMenu)]])
+      `⚠️ <b>${escapeHtml(p.name)}</b> is currently out of stock.\nPlease check back later or choose another item.`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([[Markup.button.callback(backLabel, backMenu)]])
+      }
     );
   }
 
   ctx.session.selectedProductId = p.id;
 
-  let bulkText = "💰 Bulk Discount Offers\n";
-  if (Array.isArray(p.bulk_tiers) && p.bulk_tiers.length > 0) {
-    for (const tier of p.bulk_tiers) {
-      const maxLabel = tier.max >= 99999 ? "+" : ` – ${tier.max}`;
-      bulkText += `✅ Buy ${tier.min}${maxLabel} → ${money(tier.price)} each\n`;
-    }
-  } else {
-    bulkText += `✅ Price: ${money(p.price)} each\n`;
+  const tiers = (Array.isArray(p.bulk_tiers) && p.bulk_tiers.some(t => t.min === 5))
+    ? p.bulk_tiers
+    : buildBulkTiers(p.price);
+
+  let bulkText = `🛍️ <b>${escapeHtml(p.name)}</b>${p.group ? ` <i>(${escapeHtml(p.group)})</i>` : ""}\n━━━━━━━━━━━━━━━━━━━\n`;
+  if (p.description) {
+    bulkText += `${escapeHtml(p.description)}\n\n━━━━━━━━━━━━━━━━━━━\n`;
   }
-  bulkText += `\n💎 Available: ${p.stock}`;
+  bulkText += `💰 <b>Progressive Bulk Discount Offers:</b>\n`;
+  for (const tier of tiers) {
+    const maxLabel = tier.max >= 99999 ? "+" : ` – ${tier.max}`;
+    const pct = Number(tier.discount_pct || 0);
+    const priceDecimals = String(tier.price).split(".")[1]?.length === 3 ? 3 : 2;
+    const priceStr = `$${Number(tier.price).toFixed(priceDecimals)}`;
+    if (pct > 0) {
+      bulkText += `🔥 <b>Buy ${tier.min}${maxLabel} pcs</b> → <b>${priceStr} each</b> <i>(${pct}% OFF!)</i>\n`;
+    } else {
+      bulkText += `✅ <b>Buy ${tier.min}${maxLabel} pcs</b> → <b>${priceStr} each</b> <i>(Regular Price)</i>\n`;
+    }
+  }
+  bulkText += `\n💎 <b>Available Stock:</b> ${p.stock}\n👇 <b>Select quantity below (Buy 5+ for instant discount!):</b>`;
+
+  const navRow = [Markup.button.callback(backLabel, backMenu)];
+  if (p.group) {
+    navRow.push(Markup.button.callback("🏠 All Products", "menu:buy"));
+  }
 
   const qtyButtons = [
     [
       Markup.button.callback("1", `qty:${p.id}:1`),
-      Markup.button.callback("5", `qty:${p.id}:5`),
-      Markup.button.callback("10", `qty:${p.id}:10`)
+      Markup.button.callback("5 (-10% 🔥)", `qty:${p.id}:5`),
+      Markup.button.callback("10 (-15% 🔥)", `qty:${p.id}:10`)
     ],
     [
-      Markup.button.callback("50", `qty:${p.id}:50`),
-      Markup.button.callback("100", `qty:${p.id}:100`),
-      Markup.button.callback("✏️ Custom Qty", `qty_custom:${p.id}`)
+      Markup.button.callback("25 (-20% 🔥)", `qty:${p.id}:25`),
+      Markup.button.callback("50 (-25% 🔥)", `qty:${p.id}:50`),
+      Markup.button.callback("100 (-30% 🔥)", `qty:${p.id}:100`)
     ],
-    [Markup.button.callback("🔙 Back to Catalog", backMenu)]
+    [
+      Markup.button.callback("✏️ Custom Quantity", `qty_custom:${p.id}`)
+    ],
+    navRow
   ];
 
   try {
-    await ctx.editMessageText(bulkText, Markup.inlineKeyboard(qtyButtons));
+    await ctx.editMessageText(bulkText, { parse_mode: "HTML", ...Markup.inlineKeyboard(qtyButtons) });
   } catch (e) {
-    await ctx.reply(bulkText, Markup.inlineKeyboard(qtyButtons));
+    await ctx.reply(bulkText, { parse_mode: "HTML", ...Markup.inlineKeyboard(qtyButtons) });
   }
 });
 
@@ -689,8 +1108,11 @@ bot.action(/^qty_custom:(.+)$/, async (ctx) => {
 
   ctx.session.awaitingCustomQty = productId;
   await ctx.reply(
-    `✏️ Please enter the quantity you want to purchase (1 to ${p.stock}):`,
-    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", `prod:${productId}`)]])
+    `✏️ Please enter the quantity you want to purchase (1 to ${p.stock}):\n🔥 <i>Tip: Enter 5 or more for automatic 10% to 30% bulk discount!</i>`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", `prod:${productId}`)]])
+    }
   );
 });
 
@@ -714,7 +1136,7 @@ async function showProductDetails(ctx, productId, qty) {
     );
   }
 
-  const { unitPrice, totalPrice } = calculateProductPrice(p, qty);
+  const { unitPrice, totalPrice, discountPct, originalTotal, savedAmount } = calculateProductPrice(p, qty);
   ctx.session.pendingOrder = {
     productId: p.id,
     quantity: qty,
@@ -722,24 +1144,36 @@ async function showProductDetails(ctx, productId, qty) {
     totalPrice
   };
 
-  const text = `🛍️ PRODUCT DETAILS: ${p.name}
-━━━━━━━━━━━━━━━━━━━
-${p.description}`;
+  let discountLine = "";
+  if (discountPct > 0) {
+    discountLine = `\n🔥 <b>Bulk Discount:</b> <b>${discountPct}% OFF Applied!</b> (You Save <b>$${Number(savedAmount).toFixed(2)}</b>)\n💲 <b>Regular Total:</b> <s>$${Number(originalTotal).toFixed(2)}</s>`;
+  }
 
-  const backMenu = p.category === "api_key" ? "menu:apikey" : "menu:buy";
+  const text = `🛍️ <b>PRODUCT DETAILS: ${escapeHtml(p.name)}</b>
+━━━━━━━━━━━━━━━━━━━
+${escapeHtml(p.description || "")}
+
+━━━━━━━━━━━━━━━━━━━
+🔢 <b>Selected Quantity:</b> ${qty}x
+💲 <b>Unit Price:</b> $${Number(unitPrice).toFixed(2)} (${money(unitPrice)})${discountLine}
+💰 <b>Final Total:</b> <b>$${Number(totalPrice).toFixed(2)} (${money(totalPrice)})</b>`;
+
+  const backMenu = p.category === "api_key"
+    ? "menu:apikey"
+    : (p.group ? `grp:${p.group}` : "menu:buy");
   const buttons = Markup.inlineKeyboard([
-    [Markup.button.callback(`➡️ Continue to Order (${qty}x — ${money(totalPrice)})`, `order_summary:${p.id}:${qty}`)],
+    [Markup.button.callback(`➡️ Continue to Order (${qty}x — $${Number(totalPrice).toFixed(2)})`, `order_summary:${p.id}:${qty}`)],
     [Markup.button.callback("🔢 Change Quantity", `prod:${p.id}`)],
     [Markup.button.callback("❌ Cancel", backMenu)]
   ]);
 
   if (ctx.callbackQuery) {
     try {
-      await ctx.editMessageText(text, buttons);
+      await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
       return;
     } catch (e) {}
   }
-  await ctx.reply(text, buttons);
+  await ctx.reply(text, { parse_mode: "HTML", ...buttons });
 }
 
 // User clicks Continue to Order -> Step 2: Order Summary & Terms
@@ -762,7 +1196,7 @@ async function showOrderSummary(ctx, productId, qty) {
   const p = getProduct(productId);
   if (!p) return ctx.reply("❌ Product not found.");
 
-  const { unitPrice, totalPrice } = calculateProductPrice(p, qty);
+  const { unitPrice, totalPrice, discountPct, originalTotal, savedAmount } = calculateProductPrice(p, qty);
   ctx.session.pendingOrder = {
     productId: p.id,
     quantity: qty,
@@ -770,31 +1204,38 @@ async function showOrderSummary(ctx, productId, qty) {
     totalPrice
   };
 
-  const text = `📦 ORDER SUMMARY & TERMS
+  let discountSummary = "";
+  if (discountPct > 0) {
+    discountSummary = `\n🔥 <b>Bulk Discount:</b> <b>${discountPct}% OFF</b> (Saved $${Number(savedAmount).toFixed(2)} from $${Number(originalTotal).toFixed(2)})`;
+  }
+
+  const text = `📦 <b>ORDER SUMMARY & TERMS</b>
 ━━━━━━━━━━━━━━━━━━━
-🛍️ Product: ${p.name}
-🔢 Quantity: ${qty}x
-💲 Unit Price: ${money(unitPrice)}
-💰 Total Due: ${money(totalPrice)}
+🛍️ <b>Product:</b> ${escapeHtml(p.name)}
+🔢 <b>Quantity:</b> ${qty}x
+💲 <b>Unit Price:</b> $${Number(unitPrice).toFixed(2)} (${money(unitPrice)})${discountSummary}
+💰 <b>Total Due:</b> <b>$${Number(totalPrice).toFixed(2)} (${money(totalPrice)})</b>
 
 ━━━━━━━━━━━━━━━━━━━
-✍️ Terms of Service:
-${p.terms}`;
+✍️ <b>Terms of Service:</b>
+${escapeHtml(p.terms || "• Instant automated delivery\n• Full replacement guarantee")}`;
 
-  const backMenu = p.category === "api_key" ? "menu:apikey" : "menu:buy";
+  const backMenu = p.category === "api_key"
+    ? "menu:apikey"
+    : (p.group ? `grp:${p.group}` : "menu:buy");
   const buttons = Markup.inlineKeyboard([
-    [Markup.button.callback(`✅ Agree & Pay ${money(totalPrice)}`, "order:pay_check")],
+    [Markup.button.callback(`✅ Agree & Pay $${Number(totalPrice).toFixed(2)}`, "order:pay_check")],
     [Markup.button.callback("🔙 Back to Product Details", `order_info:${p.id}:${qty}`)],
     [Markup.button.callback("❌ Cancel Order", backMenu)]
   ]);
 
   if (ctx.callbackQuery) {
     try {
-      await ctx.editMessageText(text, buttons);
+      await ctx.editMessageText(text, { parse_mode: "HTML", ...buttons });
       return;
     } catch (e) {}
   }
-  await ctx.reply(text, buttons);
+  await ctx.reply(text, { parse_mode: "HTML", ...buttons });
 }
 
 // =====================================================
@@ -1264,11 +1705,16 @@ bot.action("customer:direct_reply", async (ctx) => {
 bot.on("text", async (ctx, next) => {
   const text = ctx.message.text.trim();
 
-  // Allow admins to cancel an in-progress customer message or other text action.
-  if (isAdmin(ctx) && text === "/cancel" && (ctx.session.adminAction || ctx.session.newProductWizard)) {
-    ctx.session.adminAction = null;
-    ctx.session.newProductWizard = null;
-    await ctx.reply("❎ Action cancelled.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Admin Menu", "adm:menu")]]));
+  // Allow admins or customers to cancel any in-progress action via /cancel
+  if (text === "/cancel" || text.startsWith("/cancel@")) {
+    if (isAdmin(ctx) && (ctx.session.adminAction || ctx.session.newProductWizard)) {
+      ctx.session.adminAction = null;
+      ctx.session.newProductWizard = null;
+      await ctx.reply("❎ Admin action cancelled.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Admin Menu", "adm:menu")]]));
+      return;
+    }
+    clearAdminConflictingSession(ctx);
+    await ctx.reply("❎ Current action cancelled.", getMainMenuInlineKeyboard());
     return;
   }
 
@@ -1725,8 +2171,8 @@ Please enter your Order Code (e.g. 2026/09/20-ABCD) to look up and retrieve your
 async function showRefer(ctx) {
   if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
   const user = getOrCreateUser(ctx.from);
-  const botInfo = await bot.telegram.getMe();
-  const refLink = `https://t.me/${botInfo.username}?start=ref_${user.id}`;
+  const botUsername = await getCachedBotUsername();
+  const refLink = `https://t.me/${botUsername}?start=ref_${user.id}`;
   const settings = getAllSettings();
   const pct = settings.referral_bonus_percent || 5;
   const rewardStatus = getReferralRewardStatus(user.id);
@@ -2945,70 +3391,179 @@ Status: ${deposit.status}`;
   }
 });
 
-// Admin: Products List
+// Admin: Products & Plans Management
 bot.action("adm:products", async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
-  const products = getProducts();
-
-  let text = `🛍️ <b>MANAGE PRODUCTS & AI KEYS</b> (${products.length} Items)\n\nSelect a product to edit price, description, or stock, or tap <b>➕ Add New</b> below:`;
-  const buttons = [
-    [Markup.button.callback("➕ Add New Product / API Key", "adm_add_prod_start")]
-  ];
-
-  for (const p of products) {
-    const icon = p.category === "api_key" ? "🆙" : "🛍️";
-    const status = p.outOfStock ? "OUT" : `Stock: ${p.stock}`;
-    buttons.push([
-      Markup.button.callback(
-        `${icon} ${p.name} • ${money(p.price)} (${status})`,
-        `adm_edit_prod:${p.id}`
-      )
-    ]);
-  }
-  buttons.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
-
-  if (ctx.callbackQuery) {
-    try {
-      return await ctx.editMessageText(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
-    } catch (e) {}
-  }
-  await ctx.reply(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+  return showAdminProductsMenu(ctx);
 });
 
+async function showAdminProductsMenu(ctx) {
+  const products = getProducts();
+  const standardProds = products.filter(p => p.category !== "api_key");
+  const apiKeyProds = products.filter(p => p.category === "api_key");
+
+  const groupMap = new Map();
+  const singleProducts = [];
+  for (const p of standardProds) {
+    const grp = p.group ? String(p.group).trim() : "";
+    if (grp) {
+      if (!groupMap.has(grp)) groupMap.set(grp, []);
+      groupMap.get(grp).push(p);
+    } else {
+      singleProducts.push(p);
+    }
+  }
+
+  const text = `🛍️ <b>ADMIN PRODUCTS & PLANS MANAGER</b>
+━━━━━━━━━━━━━━━━━━━━━
+• <b>Multi-Plan Groups:</b> ${groupMap.size} Groups (${standardProds.length - singleProducts.length} Plans)
+• <b>Single Products:</b> ${singleProducts.length} Items
+• <b>AI API Keys:</b> ${apiKeyProds.length} Items
+• <b>Total Catalog Items:</b> ${products.length}
+
+👇 <i>Tap a Multi-Plan Group (📂) to edit its plans, or tap any Single Product (🛍️) / AI Key (🆙) to edit its Name, Price, Description, Terms, or Stock:</i>`;
+
+  const groupBtns = [];
+  for (const [grpName, plans] of groupMap.entries()) {
+    groupBtns.push(
+      Markup.button.callback(`📂 ${grpName} ▸ ${plans.length} Plans`, `adm_grp:${grpName}`)
+    );
+  }
+
+  const singleBtns = singleProducts.map((p) => {
+    const status = p.outOfStock ? "🚫" : "🛍️";
+    return Markup.button.callback(
+      `${status} ${p.name} $${Number(p.price || 0).toFixed(2)}`,
+      `adm_edit_prod:${p.id}`
+    );
+  });
+
+  const apiBtns = apiKeyProds.map((p) => {
+    return Markup.button.callback(
+      `🆙 ${safeLabelSlice(p.name, 18)} $${Number(p.price || 0).toFixed(2)}`,
+      `adm_edit_prod:${p.id}`
+    );
+  });
+
+  const rows = [
+    [Markup.button.callback("➕ Add New Product / Plan / AI Key", "adm_add_prod_start")],
+    ...pairButtons(groupBtns, 2),
+    ...pairButtons(singleBtns, 2),
+    ...pairButtons(apiBtns, 2),
+    [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+  ];
+
+  const markup = Markup.inlineKeyboard(rows);
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...markup });
+    } catch (e) {}
+  }
+  await ctx.reply(text, { parse_mode: "HTML", ...markup });
+}
+
+// Admin: View & Edit Plans inside a Multi-Plan Group
+bot.action(/^adm_grp:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const groupName = ctx.match[1];
+  return showAdminGroupPlans(ctx, groupName);
+});
+
+async function showAdminGroupPlans(ctx, groupName) {
+  const plans = getProducts().filter(
+    (p) => p.group && String(p.group).trim().toLowerCase() === String(groupName).trim().toLowerCase()
+  );
+
+  if (plans.length === 0) {
+    return showAdminProductsMenu(ctx);
+  }
+
+  const displayGroup = plans[0].group || groupName;
+  let text = `📂 <b>MANAGE GROUP: ${escapeHtml(displayGroup.toUpperCase())} (${plans.length} Plans)</b>\n━━━━━━━━━━━━━━━━━━━━━\nSelect any plan below to edit its <b>Name, Price, Description, Terms, or Stock</b>:\n`;
+
+  plans.forEach((plan, idx) => {
+    const status = plan.outOfStock ? "🚫 Out" : `Stock: ${plan.stock}`;
+    const firstDesc = String(plan.description || "").split("\n")[0] || "";
+    text += `\n<b>${idx + 1}. ${escapeHtml(plan.name)}</b> — <b>$${Number(plan.price).toFixed(2)}</b> (${status})\n<i>${escapeHtml(firstDesc)}</i>\n`;
+  });
+
+  const rows = plans.map((plan) => [
+    Markup.button.callback(
+      `✏️ ${plan.name} • $${Number(plan.price).toFixed(2)} (${plan.outOfStock ? "OUT" : `Stock: ${plan.stock}`})`,
+      `adm_edit_prod:${plan.id}`
+    )
+  ]);
+
+  rows.push([Markup.button.callback(`➕ Add New Plan to ${displayGroup}`, `adm_add_plan_grp:${displayGroup}`)]);
+  rows.push([Markup.button.callback("🔙 All Products & Groups", "adm:products")]);
+
+  const markup = Markup.inlineKeyboard(rows);
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...markup });
+    } catch (e) {}
+  }
+  await ctx.reply(text, { parse_mode: "HTML", ...markup });
+}
+
+// Admin: View & Edit Individual Product or Plan
 bot.action(/^adm_edit_prod:(.+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
-  const p = getProduct(ctx.match[1]);
-  if (!p) return ctx.reply("Product not found.");
+  return showAdminEditProduct(ctx, ctx.match[1]);
+});
 
-  const categoryLabel = p.category === "api_key" ? "🆙 AI API Key / Cloud Token" : "🛍️ Standard Product";
+async function showAdminEditProduct(ctx, productId) {
+  const p = getProduct(productId);
+  if (!p) return ctx.reply("❌ Product not found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Products List", "adm:products")]]));
+
+  const categoryLabel = p.category === "api_key"
+    ? "🆙 AI API Key / Cloud Token"
+    : (p.group ? `📂 Multi-Plan (${escapeHtml(p.group)})` : "🛍️ Single Product");
 
   const text = `🛍️ <b>EDIT PRODUCT: ${escapeHtml(p.name)}</b>
 ━━━━━━━━━━━━━━━━━━━━━
-• <b>Category:</b> ${categoryLabel}
-• <b>Base Price:</b> <b>${money(p.price)}</b>
-• <b>Current Stock:</b> <b>${p.stock}</b>
-• <b>Status:</b> ${p.outOfStock ? "🚫 Out of Stock" : "✅ Available"}
-• <b>Digital Codes in Stock:</b> ${Array.isArray(p.codes) ? p.codes.length : 0}
+• <b>ID:</b> <code>${escapeHtml(p.id)}</code>
+• <b>Type / Group:</b> ${categoryLabel}
+• <b>Price:</b> <b>$${Number(p.price).toFixed(2)} (${money(p.price)})</b>
+• <b>Current Stock:</b> <b>${p.stock}</b> (${p.outOfStock ? "🚫 Out of Stock" : "✅ In Stock"})
+• <b>Digital Codes Loaded:</b> ${Array.isArray(p.codes) ? p.codes.length : 0}
 
 📝 <b>Current Description:</b>
-${escapeHtml(p.description || "None")}`;
+${escapeHtml(p.description || "None")}
+
+✍️ <b>Current Terms:</b>
+${escapeHtml(p.terms || "None")}`;
+
+  const backRow = [];
+  if (p.group) {
+    backRow.push(Markup.button.callback(`🔙 ${p.group} Plans`, `adm_grp:${p.group}`));
+  }
+  backRow.push(Markup.button.callback("🛍️ All Products", "adm:products"));
 
   const buttons = Markup.inlineKeyboard([
     [
-      Markup.button.callback("💲 Set Price", `adm_set_price:${p.id}`),
-      Markup.button.callback("📝 Edit Description", `adm_set_desc:${p.id}`)
+      Markup.button.callback("✏️ Edit Name", `adm_set_name:${p.id}`),
+      Markup.button.callback("💲 Set Price", `adm_set_price:${p.id}`)
+    ],
+    [
+      Markup.button.callback("📝 Edit Description", `adm_set_desc:${p.id}`),
+      Markup.button.callback("📜 Edit Terms", `adm_set_terms:${p.id}`)
     ],
     [
       Markup.button.callback("🔢 Set Stock Number", `adm_set_stock:${p.id}`),
       Markup.button.callback("📦 Add Digital Codes", `adm_add_codes:${p.id}`)
     ],
     [
-      Markup.button.callback(p.outOfStock ? "🟢 Mark In Stock" : "🔴 Mark Out of Stock", `adm_toggle_stock:${p.id}`),
-      Markup.button.callback("🗑️ Delete Product", `adm_del_prod_confirm:${p.id}`)
+      Markup.button.callback("📂 Set Group / Category", `adm_set_group:${p.id}`),
+      Markup.button.callback(p.outOfStock ? "🟢 Mark In Stock" : "🔴 Mark Out of Stock", `adm_toggle_stock:${p.id}`)
     ],
-    [Markup.button.callback("🔙 Products List", "adm:products")]
+    [
+      Markup.button.callback("🗑️ Delete Product / Plan", `adm_del_prod_confirm:${p.id}`)
+    ],
+    backRow
   ]);
 
   if (ctx.callbackQuery) {
@@ -3017,16 +3572,56 @@ ${escapeHtml(p.description || "None")}`;
     } catch (e) {}
   }
   await ctx.reply(text, { parse_mode: "HTML", ...buttons });
-});
+}
 
 bot.action(/^adm_toggle_stock:(.+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
+  const p = getProduct(ctx.match[1]);
+  if (!p) return ctx.answerCbQuery("Product not found").catch(() => {});
+  const nextOut = !p.outOfStock;
+  updateProduct(p.id, { outOfStock: nextOut });
+  await ctx.answerCbQuery(`Updated status to: ${nextOut ? "Out of Stock" : "In Stock"}`).catch(() => {});
+  return showAdminEditProduct(ctx, p.id);
+});
+
+// Helper to safely truncate string to UTF-8 byte limit for Telegram switch_inline_query_current_chat
+function utf8ByteSlice(str, maxBytes = 250) {
+  const s = String(str || "");
+  if (Buffer.byteLength(s, "utf8") <= maxBytes) return s;
+  let out = "";
+  for (const ch of s) {
+    if (Buffer.byteLength(out + ch, "utf8") > maxBytes) break;
+    out += ch;
+  }
+  return out;
+}
+
+// Helper to strip leading @bot_username when admin sends text via switch_inline_query_current_chat
+function stripLeadingBotMention(text) {
+  return String(text || "").replace(/^@[a-zA-Z0-9_]+[\s\n]+/, "");
+}
+
+bot.action(/^adm_set_name:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
   const p = getProduct(ctx.match[1]);
-  if (p) {
-    updateProduct(p.id, { outOfStock: !p.outOfStock });
-    await ctx.reply(`✅ Updated ${p.name} status to: ${!p.outOfStock ? "In Stock" : "Out of Stock"}`);
-  }
+  if (!p) return ctx.reply("Product not found.");
+  ctx.session.adminAction = { type: "set_name", productId: p.id };
+  const prefillName = utf8ByteSlice(p.name || "", 240);
+  await ctx.reply(
+    `✏️ <b>Edit Product / Plan Name</b>\n\n` +
+    `<b>Current Name (Tap to Copy):</b>\n<code>${escapeHtml(p.name)}</code>\n\n` +
+    `💡 নিচের <b>"📲 Load Current Name in Typing Box"</b> বাটনে ক্লিক করলে আগের নামটি সরাসরি আপনার টাইপিং বক্সে চলে আসবে—নতুন করে পুরোটা লিখতে হবে না, শুধু যতটুকু দরকার এডিট করে Send করুন:`,
+    {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "📲 Load Current Name in Typing Box", switch_inline_query_current_chat: prefillName }],
+          [{ text: "❌ Cancel", callback_data: `adm_edit_prod:${p.id}` }]
+        ]
+      }
+    }
+  );
 });
 
 bot.action(/^adm_set_price:(.+)$/, async (ctx) => {
@@ -3034,11 +3629,19 @@ bot.action(/^adm_set_price:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const p = getProduct(ctx.match[1]);
   ctx.session.adminAction = { type: "set_price", productId: ctx.match[1] };
+  const currPrice = p ? Number(p.price).toFixed(2) : "1.00";
   await ctx.reply(
-    `💲 Enter new base price in USDT for <b>${p ? escapeHtml(p.name) : ctx.match[1]}</b> (e.g. <code>0.65</code> or <code>3.50</code>):`,
+    `💲 Enter new base price in USD/USDT for <b>${p ? escapeHtml(p.name) : ctx.match[1]}</b>\n` +
+    `Current Price: <code>${currPrice}</code>\n\n` +
+    `Send the new price (e.g. <code>1.35</code> or <code>0.42</code>):`,
     {
       parse_mode: "HTML",
-      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", `adm_edit_prod:${ctx.match[1]}`)]])
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: `📲 Load Current Price (${currPrice})`, switch_inline_query_current_chat: currPrice }],
+          [{ text: "❌ Cancel", callback_data: `adm_edit_prod:${ctx.match[1]}` }]
+        ]
+      }
     }
   );
 });
@@ -3050,8 +3653,90 @@ bot.action(/^adm_set_desc:(.+)$/, async (ctx) => {
   if (!p) return ctx.reply("Product not found.");
 
   ctx.session.adminAction = { type: "set_desc", productId: p.id };
+  const currentDesc = String(p.description || "").trim();
+  const prefillFull = utf8ByteSlice(currentDesc, 250);
+  const lines = currentDesc.split("\n").filter((l) => l.trim().length > 0);
+
+  const inlineKeyboard = [
+    [{ text: "📲 Load Full Description in Typing Box", switch_inline_query_current_chat: prefillFull }]
+  ];
+
+  // Add per-line pre-fill buttons so Admin can also edit any single line in 1 click without touching other lines
+  const lineBtnRow = [];
+  lines.forEach((line, idx) => {
+    const lineNum = idx + 1;
+    const prefillLine = utf8ByteSlice(`L${lineNum}: ${line}`, 245);
+    lineBtnRow.push({
+      text: `✏️ Edit Line ${lineNum}`,
+      switch_inline_query_current_chat: prefillLine
+    });
+    if (lineBtnRow.length === 2) {
+      inlineKeyboard.push([...lineBtnRow]);
+      lineBtnRow.length = 0;
+    }
+  });
+  if (lineBtnRow.length > 0) inlineKeyboard.push([...lineBtnRow]);
+
+  inlineKeyboard.push([
+    { text: "➕ Add New Line at Bottom", switch_inline_query_current_chat: "ADD: ✅ " }
+  ]);
+  inlineKeyboard.push([
+    { text: "❌ Cancel", callback_data: `adm_edit_prod:${p.id}` }
+  ]);
+
+  const numberedPreview = lines.length
+    ? lines.map((l, i) => `<b>L${i + 1}:</b> <code>${escapeHtml(l)}</code>`).join("\n")
+    : "<i>No description set</i>";
+
   await ctx.reply(
-    `📝 Send the new description for <b>${escapeHtml(p.name)}</b> below.\n\n<i>You can send multiple lines or bullet points (e.g. ✅ Instant delivery):</i>`,
+    `📝 <b>Edit Description — ${escapeHtml(p.name)}</b>\n\n` +
+    `📋 <b>Current Description (Tap to Copy Full Text):</b>\n<code>${escapeHtml(currentDesc)}</code>\n\n` +
+    `🔢 <b>Line-by-Line View:</b>\n${numberedPreview}\n\n` +
+    `💡 <b>কীভাবে আগের লেখা রেখে শুধু এডিট করবেন:</b>\n` +
+    `1️⃣ নিচের <b>"📲 Load Full Description in Typing Box"</b> বাটনে চাপ দিলে পুরো ডেসক্রিপশনটি সরাসরি আপনার মেসেজ লেখার বক্সে চলে আসবে—এরপর যতটুকু দরকার পরিবর্তন করে Send করুন!\n` +
+    `2️⃣ অথবা নির্দিষ্ট কোনো লাইন এডিট করতে চাইলে <b>"✏️ Edit Line 1 / 2..."</b> বাটনে চাপ দিন—শুধু ওই লাইনটি টাইপিং বক্সে আসবে, এডিট করে পাঠালে বাকি সব লাইন আগের মতোই থাকবে!`,
+    {
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: inlineKeyboard }
+    }
+  );
+});
+
+bot.action(/^adm_set_terms:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const p = getProduct(ctx.match[1]);
+  if (!p) return ctx.reply("Product not found.");
+
+  ctx.session.adminAction = { type: "set_terms", productId: p.id };
+  const currentTerms = String(p.terms || "").trim();
+  const prefillTerms = utf8ByteSlice(currentTerms, 250);
+
+  await ctx.reply(
+    `📜 <b>Edit Terms of Service — ${escapeHtml(p.name)}</b>\n\n` +
+    `<b>Current Terms (Tap to Copy):</b>\n<code>${escapeHtml(currentTerms)}</code>\n\n` +
+    `💡 নিচের <b>"📲 Load Current Terms in Typing Box"</b> বাটনে ক্লিক করলে আগের Terms লেখাটি সরাসরি আপনার টাইপিং বক্সে চলে আসবে—শুধু এডিট করে Send করুন:`,
+    {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "📲 Load Current Terms in Typing Box", switch_inline_query_current_chat: prefillTerms }],
+          [{ text: "❌ Cancel", callback_data: `adm_edit_prod:${p.id}` }]
+        ]
+      }
+    }
+  );
+});
+
+bot.action(/^adm_set_group:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const p = getProduct(ctx.match[1]);
+  if (!p) return ctx.reply("Product not found.");
+
+  ctx.session.adminAction = { type: "set_group_name", productId: p.id };
+  await ctx.reply(
+    `📂 <b>Set Multi-Plan Group for ${escapeHtml(p.name)}</b>\n\nCurrent Group: <b>${escapeHtml(p.group || "None (Single Product)")}</b>\n\n• Send a group name (e.g. <code>Gemini</code>, <code>Claude AI</code>, <code>ChatGPT</code>, <code>CapCut</code>, <code>Canva</code>, <code>Gmail</code>, <code>Autodesk</code>, <code>Muse</code>) to group this plan under that menu.\n• Or send <code>none</code> to make it a standalone Single Product:`,
     {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", `adm_edit_prod:${p.id}`)]])
@@ -3062,15 +3747,29 @@ bot.action(/^adm_set_desc:(.+)$/, async (ctx) => {
 bot.action(/^adm_set_stock:(.+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
+  const p = getProduct(ctx.match[1]);
   ctx.session.adminAction = { type: "set_stock", productId: ctx.match[1] };
-  await ctx.reply(`Enter new stock count for product ${ctx.match[1]} (e.g. 500):`);
+  await ctx.reply(
+    `🔢 Enter new stock count for <b>${p ? escapeHtml(p.name) : ctx.match[1]}</b> (e.g. <code>500</code>):`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", `adm_edit_prod:${ctx.match[1]}`)]])
+    }
+  );
 });
 
 bot.action(/^adm_add_codes:(.+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
+  const p = getProduct(ctx.match[1]);
   ctx.session.adminAction = { type: "add_codes", productId: ctx.match[1] };
-  await ctx.reply(`Send the digital codes/links to add to ${ctx.match[1]} (one per line):`);
+  await ctx.reply(
+    `📦 Send the digital codes/links/accounts to add to <b>${p ? escapeHtml(p.name) : ctx.match[1]}</b> (one per line):`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", `adm_edit_prod:${ctx.match[1]}`)]])
+    }
+  );
 });
 
 bot.action(/^adm_del_prod_confirm:(.+)$/, async (ctx) => {
@@ -3099,33 +3798,40 @@ bot.action(/^adm_del_prod_exec:(.+)$/, async (ctx) => {
   const productId = ctx.match[1];
   const p = getProduct(productId);
   const name = p ? p.name : productId;
+  const grp = p?.group;
   deleteProduct(productId);
 
+  const navBtns = [];
+  if (grp) navBtns.push([Markup.button.callback(`🔙 Back to ${grp} Plans`, `adm_grp:${grp}`)]);
+  navBtns.push([Markup.button.callback("🛍️ Back to Products List", "adm:products")]);
+
   await ctx.reply(
-    `🗑️ Product <b>${escapeHtml(name)}</b> has been permanently deleted from database.`,
+    `🗑️ Product <b>${escapeHtml(name)}</b> has been permanently deleted from the database.`,
     {
       parse_mode: "HTML",
-      ...Markup.inlineKeyboard([[Markup.button.callback("🔙 Back to Products List", "adm:products")]])
+      ...Markup.inlineKeyboard(navBtns)
     }
   );
 });
 
-// Admin: Add Product Multi-Step Wizard
+// Admin: Add Product / Plan Multi-Step Wizard
 bot.action("adm_add_prod_start", async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
   ctx.session.newProductWizard = null;
   ctx.session.adminAction = null;
 
-  const text = `➕ <b>ADD NEW PRODUCT OR AI KEY</b>
+  const text = `➕ <b>ADD NEW PRODUCT, PLAN OR AI KEY</b>
 ━━━━━━━━━━━━━━━━━━━━━
-Choose the category for the new item:
+Choose what type of item you want to add:
 
-• <b>Standard Product:</b> Regular accounts, software, subscriptions (appears in 🛍️ Buy menu).
-• <b>AI API Key / Token:</b> AI model API tokens, developer cloud keys (appears in 🆙 API Key menu).`;
+• <b>Single Product:</b> Appears directly in 🛍️ Buy with its price (e.g. <code>NETFLIX $2.50</code>).
+• <b>Plan in Multi-Plan Group:</b> Appears inside a group like <code>Gemini ▸ X Plans »</code> or <code>Claude AI ▸ X Plans »</code>.
+• <b>AI API Key / Token:</b> Appears in the 🆙 API Key menu.`;
 
   const buttons = Markup.inlineKeyboard([
-    [Markup.button.callback("🛍️ Standard Product", "adm_wizard_cat:standard")],
+    [Markup.button.callback("🛍️ Single Product (Direct in Buy Menu)", "adm_wizard_cat:standard")],
+    [Markup.button.callback("📂 Plan in Multi-Plan Group", "adm_wizard_cat:group_plan")],
     [Markup.button.callback("🆙 AI API Key / Cloud Token", "adm_wizard_cat:api_key")],
     [Markup.button.callback("❌ Cancel", "adm:products")]
   ]);
@@ -3138,19 +3844,53 @@ Choose the category for the new item:
   await ctx.reply(text, { parse_mode: "HTML", ...buttons });
 });
 
-bot.action(/^adm_wizard_cat:(.+)$/, async (ctx) => {
+bot.action(/^adm_add_plan_grp:(.+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
-  const category = ctx.match[1];
-
+  const groupName = ctx.match[1];
   ctx.session.newProductWizard = {
-    category,
+    category: "standard",
+    group: groupName,
     step: "name"
   };
 
-  const catName = category === "api_key" ? "AI API Key / Token" : "Standard Product";
   await ctx.reply(
-    `📌 <b>Step 1 of 4: Enter Product Name</b>\n\nCategory: <b>${catName}</b>\nPlease send the name of the product:\n<i>(Example: "ChatGPT Plus 1 Month" or "Midjourney Pro Key")</i>`,
+    `📌 <b>Step 1 of 4: Enter Plan Name</b>\n\nGroup: <b>📂 ${escapeHtml(groupName)}</b>\nPlease send the name of the new plan:\n<i>(Example: "${escapeHtml(groupName)} Pro — 6 Months")</i>`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", `adm_grp:${groupName}`)]])
+    }
+  );
+});
+
+bot.action(/^adm_wizard_cat:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const mode = ctx.match[1];
+
+  if (mode === "group_plan") {
+    ctx.session.newProductWizard = {
+      category: "standard",
+      step: "group"
+    };
+    return ctx.reply(
+      `📂 <b>Step 1 of 5: Enter Group Name</b>\n\nSend the Group Name for this plan (e.g. <code>Gemini</code>, <code>Claude AI</code>, <code>ChatGPT</code>, <code>CapCut</code>, <code>Canva</code>, <code>Gmail</code>, <code>Autodesk</code>, <code>Muse</code>, or a new group name):`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:products")]])
+      }
+    );
+  }
+
+  ctx.session.newProductWizard = {
+    category: mode === "api_key" ? "api_key" : "standard",
+    group: undefined,
+    step: "name"
+  };
+
+  const catName = mode === "api_key" ? "AI API Key / Token" : "Single Standard Product";
+  await ctx.reply(
+    `📌 <b>Step 1 of 4: Enter Product Name</b>\n\nCategory: <b>${catName}</b>\nPlease send the name of the product:\n<i>(Example: "PRIME VIDEO" or "Midjourney Pro Key")</i>`,
     {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:products")]])
@@ -3162,6 +3902,21 @@ async function handleNewProductWizardInput(ctx, text) {
   const wizard = ctx.session.newProductWizard;
   if (!wizard) return;
 
+  if (wizard.step === "group") {
+    if (!text || text.trim().length < 2) {
+      return ctx.reply("❌ Group name is too short. Please send a valid group name:");
+    }
+    wizard.group = text.trim();
+    wizard.step = "name";
+    return ctx.reply(
+      `📌 <b>Enter Plan Name</b>\n\nGroup: <b>📂 ${escapeHtml(wizard.group)}</b>\nPlease send the name of the plan:`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:products")]])
+      }
+    );
+  }
+
   if (wizard.step === "name") {
     if (!text || text.length < 2) {
       return ctx.reply("❌ Product name is too short. Please send a valid name:");
@@ -3169,7 +3924,7 @@ async function handleNewProductWizardInput(ctx, text) {
     wizard.name = text.trim();
     wizard.step = "price";
     return ctx.reply(
-      `💲 <b>Step 2 of 4: Set Base Price</b>\n\nProduct: <b>${escapeHtml(wizard.name)}</b>\nPlease send the base price in USDT (e.g. <code>2.50</code> or <code>5.00</code>):`,
+      `💲 <b>Set Base Price</b>\n\nProduct: <b>${escapeHtml(wizard.name)}</b>\nPlease send the base price in USD/USDT (e.g. <code>1.50</code> or <code>4.20</code>):`,
       {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:products")]])
@@ -3185,7 +3940,7 @@ async function handleNewProductWizardInput(ctx, text) {
     wizard.price = Number(price.toFixed(2));
     wizard.step = "stock";
     return ctx.reply(
-      `🔢 <b>Step 3 of 4: Initial Stock</b>\n\nPrice set to: <b>${money(wizard.price)}</b>\nPlease send initial stock count (e.g. <code>50</code> or <code>100</code>):`,
+      `🔢 <b>Initial Stock</b>\n\nPrice set to: <b>$${wizard.price.toFixed(2)} (${money(wizard.price)})</b>\nPlease send initial stock count (e.g. <code>100</code> or <code>250</code>):`,
       {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:products")]])
@@ -3201,7 +3956,7 @@ async function handleNewProductWizardInput(ctx, text) {
     wizard.stock = stock;
     wizard.step = "description";
     return ctx.reply(
-      `📝 <b>Step 4 of 4: Product Description</b>\n\nStock set to: <b>${stock}</b>\nPlease send the product description below (supports multiple lines/bullet points):\n\n<i>Example:</i>\n<code>✅ Official 1 Month Subscription\n✅ Fast instant delivery to chat\n✅ 100% Guaranteed</code>`,
+      `📝 <b>Product Description</b>\n\nStock set to: <b>${stock}</b>\nPlease send the product description below (supports multiple lines/bullet points):\n\n<i>Example:</i>\n<code>✨ Official Premium Subscription\n⏳ Validity: 1 Month (Full Warranty)\n⚡ Delivery: Instant Automated Delivery</code>`,
       {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", "adm:products")]])
@@ -3223,28 +3978,29 @@ async function handleNewProductWizardInput(ctx, text) {
     const newProduct = {
       id,
       name: wizard.name,
+      ...(wizard.group ? { group: wizard.group } : {}),
       category: wizard.category,
       price: wizard.price,
       stock: wizard.stock,
       outOfStock: wizard.stock <= 0,
       description: description,
-      terms: "• Instant automated delivery\n• Full guarantee",
+      terms: "• Instant automated delivery\n• Full replacement guarantee",
       codes: [],
-      bulk_tiers: [
-        { min: 1, max: 10, price: wizard.price },
-        { min: 11, max: 999999, price: Number((wizard.price * 0.9).toFixed(2)) }
-      ]
+      bulk_tiers: buildBulkTiers(wizard.price)
     };
 
     addProduct(newProduct);
 
-    const menuLabel = newProduct.category === "api_key" ? "🆙 AI API Key Store" : "🛍️ Buy Menu";
+    const menuLabel = newProduct.category === "api_key"
+      ? "🆙 AI API Key Store"
+      : (newProduct.group ? `📂 ${newProduct.group} Plans` : "🛍️ Buy Menu");
+
     return ctx.reply(
-      `🎉 <b>NEW PRODUCT ADDED SUCCESSFULLY!</b>\n━━━━━━━━━━━━━━━━━━━━━\n• <b>ID:</b> <code>${id}</code>\n• <b>Name:</b> <b>${escapeHtml(newProduct.name)}</b>\n• <b>Category:</b> ${newProduct.category === "api_key" ? "🆙 AI API Key" : "🛍️ Standard"}\n• <b>Price:</b> <b>${money(newProduct.price)}</b>\n• <b>Stock:</b> <b>${newProduct.stock}</b>\n\nCustomers can now view and buy this item under <b>${menuLabel}</b>!`,
+      `🎉 <b>NEW PRODUCT ADDED SUCCESSFULLY!</b>\n━━━━━━━━━━━━━━━━━━━━━\n• <b>ID:</b> <code>${id}</code>\n• <b>Name:</b> <b>${escapeHtml(newProduct.name)}</b>${newProduct.group ? `\n• <b>Group:</b> <b>${escapeHtml(newProduct.group)}</b>` : ""}\n• <b>Price:</b> <b>$${newProduct.price.toFixed(2)} (${money(newProduct.price)})</b>\n• <b>Stock:</b> <b>${newProduct.stock}</b>\n\nCustomers can now view and buy this item under <b>${escapeHtml(menuLabel)}</b>!`,
       {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([
-          [Markup.button.callback("📦 Add Digital Codes/Links", `adm_add_codes:${id}`)],
+          [Markup.button.callback("✏️ Edit Product", `adm_edit_prod:${id}`), Markup.button.callback("📦 Add Codes", `adm_add_codes:${id}`)],
           [Markup.button.callback("🛍️ View Products List", "adm:products")]
         ])
       }
@@ -3500,34 +4256,39 @@ bot.action("adm:pin_broadcast", async (ctx) => {
   );
 });
 
-// Admin: Remove All Old Pins from All Users
+// Admin: Remove All Old Pins from All Users (Background Non-Blocking Execution)
 async function executeUnpinAllUsers(ctx) {
   const users = getAllUsers();
-  await ctx.reply(`⏳ Removing all old pinned messages from ${users.length} users' chats...`);
-  let unpinnedCount = 0;
-  let failedCount = 0;
+  const adminChatId = ctx.chat?.id || ADMIN_ID;
+  await ctx.reply(`⏳ Removing all old pinned messages from ${users.length} users' chats in the background (bot remains 100% responsive)...`);
 
-  for (const u of users) {
-    try {
-      await rawCallApi("unpinAllChatMessages", { chat_id: u.id });
-      unpinnedCount++;
-    } catch (e) {
-      failedCount++;
-    }
-    await new Promise(resolve => setTimeout(resolve, 35));
-  }
+  setImmediate(async () => {
+    let unpinnedCount = 0;
+    let failedCount = 0;
 
-  setSetting("pinned_broadcast_text", "");
-  return ctx.reply(
-    `🗑️ <b>ALL OLD PINS REMOVED!</b>\n━━━━━━━━━━━━━━━━━━━━\n✅ Cleared Pins For: <b>${unpinnedCount}</b> users\n⚠️ Unreachable / Skipped: <b>${failedCount}</b>\n👥 Total Users Checked: <b>${users.length}</b>`,
-    {
-      parse_mode: "HTML",
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback("📌 Pin a New Message", "adm:pin_broadcast")],
-        [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
-      ])
+    for (const u of users) {
+      try {
+        await rawCallApi("unpinAllChatMessages", { chat_id: u.id });
+        unpinnedCount++;
+      } catch (e) {
+        failedCount++;
+      }
+      await new Promise(resolve => setTimeout(resolve, 35));
     }
-  );
+
+    setSetting("pinned_broadcast_text", "");
+    bot.telegram.sendMessage(
+      adminChatId,
+      `🗑️ <b>ALL OLD PINS REMOVED!</b>\n━━━━━━━━━━━━━━━━━━━━\n✅ Cleared Pins For: <b>${unpinnedCount}</b> users\n⚠️ Unreachable / Skipped: <b>${failedCount}</b>\n👥 Total Users Checked: <b>${users.length}</b>`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("📌 Pin a New Message", "adm:pin_broadcast")],
+          [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+        ])
+      }
+    ).catch(() => {});
+  });
 }
 
 bot.action("adm:unpin_all_users", async (ctx) => {
@@ -3558,59 +4319,63 @@ async function executePinBroadcastToAllUsers(ctx, text) {
   const allUsers = getAllUsers();
   const activeUsers = allUsers.filter(u => !u.is_blocked && !isUserBlocked(u.id));
   const blockedSkipped = allUsers.length - activeUsers.length;
+  const adminChatId = ctx.chat?.id || ADMIN_ID;
 
-  await ctx.reply(`⏳ Sending & pinning message to ${activeUsers.length} active users (removing old pins first)...`);
+  await ctx.reply(`⏳ Sending & pinning message to ${activeUsers.length} active users in the background (bot remains 100% responsive)...`);
 
-  let sent = 0;
-  let pinned = 0;
-  let failed = 0;
+  setImmediate(async () => {
+    let sent = 0;
+    let pinned = 0;
+    let failed = 0;
 
-  for (const u of activeUsers) {
-    if (isUserBlocked(u.id)) continue;
-    try {
-      // 1. Remove any old pinned messages in this user's chat first
-      await rawCallApi("unpinAllChatMessages", { chat_id: u.id }).catch(() => {});
+    for (const u of activeUsers) {
+      if (isUserBlocked(u.id)) continue;
+      try {
+        // 1. Remove any old pinned messages in this user's chat first
+        await rawCallApi("unpinAllChatMessages", { chat_id: u.id }).catch(() => {});
 
-      // 2. Send the new message
-      const sentMsg = await bot.telegram.sendMessage(
-        u.id,
-        text,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback("🛍️ Buy", "menu:buy"),
-            Markup.button.callback("🎫 Open Ticket", "ticket:new")
-          ]
-        ])
-      );
-      sent++;
+        // 2. Send the new message
+        const sentMsg = await bot.telegram.sendMessage(
+          u.id,
+          text,
+          Markup.inlineKeyboard([
+            [
+              Markup.button.callback("🛍️ Buy", "menu:buy"),
+              Markup.button.callback("🎫 Open Ticket", "ticket:new")
+            ]
+          ])
+        );
+        sent++;
 
-      // 3. Pin the newly sent message
-      if (sentMsg && sentMsg.message_id) {
-        await rawCallApi("pinChatMessage", {
-          chat_id: u.id,
-          message_id: sentMsg.message_id,
-          disable_notification: false
-        });
-        pinned++;
+        // 3. Pin the newly sent message
+        if (sentMsg && sentMsg.message_id) {
+          await rawCallApi("pinChatMessage", {
+            chat_id: u.id,
+            message_id: sentMsg.message_id,
+            disable_notification: false
+          });
+          pinned++;
+        }
+      } catch (e) {
+        failed++;
       }
-    } catch (e) {
-      failed++;
+      await new Promise(resolve => setTimeout(resolve, 45));
     }
-    await new Promise(resolve => setTimeout(resolve, 45));
-  }
 
-  setSetting("pinned_broadcast_text", text);
+    setSetting("pinned_broadcast_text", text);
 
-  return ctx.reply(
-    `📌 <b>BROADCAST & PIN COMPLETED!</b>\n━━━━━━━━━━━━━━━━━━━━\n✅ Message Sent: <b>${sent}</b>\n📌 Successfully Pinned: <b>${pinned}</b>\n❌ Failed: <b>${failed}</b>\n🚫 Blocked (Skipped): <b>${blockedSkipped}</b>\n👥 Total Active Customers: <b>${activeUsers.length}</b>`,
-    {
-      parse_mode: "HTML",
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback("🗑️ Remove All Pins", "adm:unpin_all_users")],
-        [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
-      ])
-    }
-  );
+    bot.telegram.sendMessage(
+      adminChatId,
+      `📌 <b>BROADCAST & PIN COMPLETED!</b>\n━━━━━━━━━━━━━━━━━━━━\n✅ Message Sent: <b>${sent}</b>\n📌 Successfully Pinned: <b>${pinned}</b>\n❌ Failed: <b>${failed}</b>\n🚫 Blocked (Skipped): <b>${blockedSkipped}</b>\n👥 Total Active Customers: <b>${activeUsers.length}</b>`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("🗑️ Remove All Pins", "adm:unpin_all_users")],
+          [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
+        ])
+      }
+    ).catch(() => {});
+  });
 }
 
 // Admin: Channel Auto-Poster Dashboard
@@ -3674,52 +4439,149 @@ bot.action("adm_send_channel_post_test", async (ctx) => {
 });
 
 // Handle admin text inputs
-async function handleAdminTextInput(ctx, text) {
+async function handleAdminTextInput(ctx, rawText) {
   const action = ctx.session.adminAction;
   ctx.session.adminAction = null;
+  const text = stripLeadingBotMention(rawText);
 
   switch (action.type) {
+    case "set_name": {
+      const p = getProduct(action.productId);
+      if (!p) return ctx.reply("❌ Product not found.");
+      const newName = text.trim();
+      if (newName.length < 2) return ctx.reply("❌ Name is too short.");
+      updateProduct(action.productId, { name: newName });
+      return ctx.reply(
+        `✅ <b>Product Name updated to:</b> <b>${escapeHtml(newName)}</b>`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("🔙 Back to Product", `adm_edit_prod:${action.productId}`)],
+            [Markup.button.callback("🛍️ All Products", "adm:products")]
+          ])
+        }
+      );
+    }
     case "set_price": {
       const price = parseFloat(text.replace("$", "").trim());
       if (isNaN(price) || price <= 0) return ctx.reply("❌ Invalid price number. Please enter a valid positive number.");
       const updatedPrice = Number(price.toFixed(2));
       const p = getProduct(action.productId);
-      const bulkTiers = Array.isArray(p?.bulk_tiers) ? p.bulk_tiers.map(t => {
-        if (t.min === 1) return { ...t, price: updatedPrice };
-        return t;
-      }) : undefined;
+      const bulkTiers = buildBulkTiers(updatedPrice);
       updateProduct(action.productId, { price: updatedPrice, bulk_tiers: bulkTiers });
       return ctx.reply(
-        `✅ <b>Updated price of ${p ? escapeHtml(p.name) : action.productId} to ${money(updatedPrice)}</b>`,
+        `✅ <b>Updated price of ${p ? escapeHtml(p.name) : action.productId} to $${updatedPrice.toFixed(2)} (${money(updatedPrice)})</b>\n🔥 <i>Progressive bulk discounts (5+ = 10% OFF up to 30% OFF) updated automatically!</i>`,
         {
           parse_mode: "HTML",
-          ...Markup.inlineKeyboard([[Markup.button.callback("🔙 Back to Product", `adm_edit_prod:${action.productId}`)]])
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("🔙 Back to Product", `adm_edit_prod:${action.productId}`)],
+            [Markup.button.callback("🛍️ All Products", "adm:products")]
+          ])
         }
       );
     }
     case "set_desc": {
       const p = getProduct(action.productId);
       if (!p) return ctx.reply("❌ Product not found.");
-      updateProduct(action.productId, { description: text.trim() });
+      const cleaned = text.trim();
+      let updatedDesc = cleaned;
+
+      // Support single-line edit (e.g. "L2: new line text") so other lines stay untouched
+      const lineMatch = cleaned.match(/^L(\d+)\s*:\s*([\s\S]*)$/i);
+      const addMatch = cleaned.match(/^ADD\s*:\s*([\s\S]*)$/i);
+      if (lineMatch) {
+        const lineIndex = parseInt(lineMatch[1], 10) - 1;
+        const replacementLine = lineMatch[2].trim();
+        const existingLines = String(p.description || "").trim().split("\n").filter((l) => l.trim().length > 0);
+        if (lineIndex >= 0 && lineIndex < existingLines.length) {
+          if (replacementLine) {
+            existingLines[lineIndex] = replacementLine;
+          } else {
+            existingLines.splice(lineIndex, 1);
+          }
+          updatedDesc = existingLines.join("\n");
+        }
+      } else if (addMatch) {
+        const newLine = addMatch[1].trim();
+        const existing = String(p.description || "").trim();
+        updatedDesc = newLine ? (existing ? `${existing}\n${newLine}` : newLine) : existing;
+      }
+
+      updateProduct(action.productId, { description: updatedDesc });
       return ctx.reply(
-        `✅ <b>Description updated for ${escapeHtml(p.name)}!</b>\n\n📝 <b>New Description:</b>\n${escapeHtml(text.trim())}`,
+        `✅ <b>Description updated for ${escapeHtml(p.name)}!</b>\n\n📝 <b>Updated Description:</b>\n${escapeHtml(updatedDesc)}`,
         {
           parse_mode: "HTML",
-          ...Markup.inlineKeyboard([[Markup.button.callback("🔙 Back to Product", `adm_edit_prod:${action.productId}`)]])
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("📝 Edit Description Again", `adm_set_desc:${action.productId}`)],
+            [Markup.button.callback("🔙 Back to Product", `adm_edit_prod:${action.productId}`)],
+            [Markup.button.callback("🛍️ All Products", "adm:products")]
+          ])
+        }
+      );
+    }
+    case "set_terms": {
+      const p = getProduct(action.productId);
+      if (!p) return ctx.reply("❌ Product not found.");
+      updateProduct(action.productId, { terms: text.trim() });
+      return ctx.reply(
+        `✅ <b>Terms of Service updated for ${escapeHtml(p.name)}!</b>\n\n📜 <b>New Terms:</b>\n${escapeHtml(text.trim())}`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("🔙 Back to Product", `adm_edit_prod:${action.productId}`)],
+            [Markup.button.callback("🛍️ All Products", "adm:products")]
+          ])
+        }
+      );
+    }
+    case "set_group_name": {
+      const p = getProduct(action.productId);
+      if (!p) return ctx.reply("❌ Product not found.");
+      const rawGroup = text.trim();
+      const newGroup = rawGroup.toLowerCase() === "none" ? "" : rawGroup;
+      updateProduct(action.productId, { group: newGroup || undefined });
+      return ctx.reply(
+        `✅ <b>Group updated for ${escapeHtml(p.name)}!</b>\nNew Group: <b>${escapeHtml(newGroup || "None (Single Product)")}</b>`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("🔙 Back to Product", `adm_edit_prod:${action.productId}`)],
+            [Markup.button.callback("🛍️ All Products", "adm:products")]
+          ])
         }
       );
     }
     case "set_stock": {
       const stock = parseInt(text, 10);
-      if (isNaN(stock)) return ctx.reply("❌ Invalid stock number.");
+      if (isNaN(stock) || stock < 0) return ctx.reply("❌ Invalid stock number.");
+      const p = getProduct(action.productId);
       updateProduct(action.productId, { stock, outOfStock: stock <= 0 });
-      return ctx.reply(`✅ Updated stock of ${action.productId} to ${stock}`);
+      return ctx.reply(
+        `✅ <b>Updated stock of ${p ? escapeHtml(p.name) : action.productId} to ${stock}</b>`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("🔙 Back to Product", `adm_edit_prod:${action.productId}`)],
+            [Markup.button.callback("🛍️ All Products", "adm:products")]
+          ])
+        }
+      );
     }
     case "add_codes": {
       const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
       if (lines.length === 0) return ctx.reply("❌ No valid codes provided.");
-      addProductCodes(action.productId, lines);
-      return ctx.reply(`✅ Added ${lines.length} codes/links to ${action.productId}! Stock increased automatically.`);
+      const p = addProductCodes(action.productId, lines);
+      return ctx.reply(
+        `✅ <b>Added ${lines.length} digital codes/links to ${escapeHtml(p.name)}!</b>\nNew Stock: <b>${p.stock}</b>`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("🔙 Back to Product", `adm_edit_prod:${action.productId}`)],
+            [Markup.button.callback("🛍️ All Products", "adm:products")]
+          ])
+        }
+      );
     }
     case "user_bal_prompt": {
       const [userId, deltaStr] = text.split(/\s+/);
@@ -4106,25 +4968,35 @@ async function handleAdminTextInput(ctx, text) {
       const allUsers = getAllUsers();
       const activeUsers = allUsers.filter(u => !u.is_blocked && !isUserBlocked(u.id));
       const blockedSkipped = allUsers.length - activeUsers.length;
-      let sent = 0;
-      let failed = 0;
-      for (const u of activeUsers) {
-        if (isUserBlocked(u.id)) continue;
-        try {
-          await bot.telegram.sendMessage(u.id, text, Markup.inlineKeyboard([
-            [
-              Markup.button.callback("🎫 Open Ticket", "ticket:new"),
-              Markup.button.callback("🛍️ Buy", "menu:buy")
-            ]
-          ]));
-          sent++;
-        } catch (e) {
-          failed++;
+      const adminChatId = ctx.chat?.id || ADMIN_ID;
+
+      await ctx.reply(`⏳ Broadcasting message to ${activeUsers.length} active customers in the background (bot remains 100% responsive)...`);
+
+      setImmediate(async () => {
+        let sent = 0;
+        let failed = 0;
+        for (const u of activeUsers) {
+          if (isUserBlocked(u.id)) continue;
+          try {
+            await bot.telegram.sendMessage(u.id, text, Markup.inlineKeyboard([
+              [
+                Markup.button.callback("🎫 Open Ticket", "ticket:new"),
+                Markup.button.callback("🛍️ Buy", "menu:buy")
+              ]
+            ]));
+            sent++;
+          } catch (e) {
+            failed++;
+          }
+          // Keep broadcast traffic below Telegram's usual per-chat delivery limits.
+          await new Promise(resolve => setTimeout(resolve, 40));
         }
-        // Keep broadcast traffic below Telegram's usual per-chat delivery limits.
-        await new Promise(resolve => setTimeout(resolve, 40));
-      }
-      return ctx.reply(`📢 Broadcast completed.\n✅ Sent: ${sent}\n❌ Failed: ${failed}\n🚫 Blocked (Skipped): ${blockedSkipped}\n👥 Total active customers: ${activeUsers.length}`);
+        bot.telegram.sendMessage(
+          adminChatId,
+          `📢 Broadcast completed.\n✅ Sent: ${sent}\n❌ Failed: ${failed}\n🚫 Blocked (Skipped): ${blockedSkipped}\n👥 Total active customers: ${activeUsers.length}`
+        ).catch(() => {});
+      });
+      return;
     }
     case "pin_broadcast": {
       return executePinBroadcastToAllUsers(ctx, text);
@@ -4322,8 +5194,7 @@ async function sendGroupPurchaseNotice(productOrName, quantity, maskedId = null)
 👑 <i>Thank you for choosing Gemini Shop!</i></blockquote>`;
 
   try {
-    const botInfo = await bot.telegram.getMe().catch(() => null);
-    const botUsername = botInfo?.username || "aibuyshop_bot";
+    const botUsername = await getCachedBotUsername();
     const result = await bot.telegram.sendMessage(groupId, msg, {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard([
@@ -4395,8 +5266,7 @@ async function sendGroupDepositNotice() {
 ✅ <b>Status:</b> <b>Success (Credited)</b></blockquote>`;
 
   try {
-    const botInfo = await bot.telegram.getMe().catch(() => null);
-    const botUsername = botInfo?.username || "aibuyshop_bot";
+    const botUsername = await getCachedBotUsername();
     const result = await bot.telegram.sendMessage(groupId, msg, {
       parse_mode: "HTML",
       disable_web_page_preview: true,
@@ -4469,8 +5339,7 @@ async function sendChannelScheduledPost(customPost = null) {
   const formattedText = `<blockquote>${postContent}</blockquote>`;
 
   try {
-    const botInfo = await bot.telegram.getMe().catch(() => null);
-    const botUsername = botInfo?.username || "aibuyshop_bot";
+    const botUsername = await getCachedBotUsername();
     const result = await bot.telegram.sendMessage(channelId, formattedText, {
       parse_mode: "HTML",
       disable_web_page_preview: true,
@@ -4537,6 +5406,9 @@ let pollingStarted = false;
 async function startApp() {
   // Initialize persistent database (Google Firebase or local file fallback)
   await initStore();
+
+  // Register official Telegram '/' command menu & chat menu button
+  registerBotCommands().catch(() => {});
 
   if (WEBHOOK_URL) {
     const cleanUrl = WEBHOOK_URL.replace(/\/+$/, "");
@@ -4611,6 +5483,11 @@ const stopApp = (signal) => {
 
   console.log(`Stopping bot and server on ${signal}...`);
   isShuttingDown = true;
+
+  // Flush any pending debounced database writes synchronously before exit
+  try {
+    flushStoreSync();
+  } catch (_) {}
 
   if (channelPosterInterval) {
     clearInterval(channelPosterInterval);

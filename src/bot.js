@@ -45,6 +45,7 @@ const {
   approveDeposit,
   rejectDeposit,
   getPendingDeposits,
+  getAllDeposits,
   getUserDeposits,
   createOrder,
   getOrder,
@@ -852,35 +853,13 @@ bot.command("products", async (ctx) => {
 bot.command("deposits", async (ctx) => {
   if (!adminOnly(ctx)) return;
   clearAdminConflictingSession(ctx);
-  const list = getPendingDeposits();
-  if (list.length === 0) {
-    return ctx.reply("✅ No pending deposits.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Admin Menu", "adm:menu")]]));
-  }
-  const buttons = list.slice(0, 10).map((d) => [
-    Markup.button.callback(`🔍 ${d.id} • ${money(d.amount)} (${d.user_name})`, `adm_view_dep:${d.id}`)
-  ]);
-  buttons.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
-  return ctx.reply(`📥 PENDING DEPOSITS (${list.length}):`, Markup.inlineKeyboard(buttons));
+  return showAdminDepositsMenu(ctx, "pending", 0);
 });
 
 bot.command("tickets", async (ctx) => {
   if (!adminOnly(ctx)) return;
   clearAdminConflictingSession(ctx);
-  const openList = getOpenTickets();
-  const allList = getAllTickets();
-  const displayList = openList.length > 0 ? openList : allList.slice(0, 10);
-  if (displayList.length === 0) {
-    return ctx.reply("✅ No support tickets found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Admin Menu", "adm:menu")]]));
-  }
-  const buttons = displayList.slice(0, 12).map((t) => {
-    const icon = t.status === "open" ? "🟢" : t.status === "replied" ? "💬" : "✅";
-    return [Markup.button.callback(`${icon} #${t.id} — ${t.user_name} (${t.category.replace(/^[^\s]+\s/, "")})`, `adm_tkt_view:${t.id}`)];
-  });
-  buttons.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
-  return ctx.reply(`🎫 <b>SUPPORT TICKETS (${displayList.length})</b>\nSelect a ticket below:`, {
-    parse_mode: "HTML",
-    ...Markup.inlineKeyboard(buttons)
-  });
+  return showAdminTicketsMenu(ctx, "open", 0);
 });
 
 bot.command("customers", async (ctx) => {
@@ -1955,15 +1934,18 @@ async function notifyAdminNewDeposit(ctx, deposit, photoFileId = null) {
 }
 
 // Admin deposit approval / rejection handlers
-bot.action(/^adm_dep_app:(.+)$/, async (ctx) => {
+bot.action(/^adm_dep_app:([^:]+)(?::([^:]+):(\d+))?$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
   const depositId = ctx.match[1];
+  const backFilter = ctx.match[2] || "pending";
+  const backPage = Number(ctx.match[3]) || 0;
   try {
     const { deposit, user } = approveDeposit(depositId);
-    const textMsg = `✅ DEPOSIT APPROVED!\nDeposit ID: ${deposit.id}\nUser: ${deposit.user_name}\nCredited: ${money(deposit.amount)}\nUser New Balance: ${money(user.wallet_balance)}`;
+    const textMsg = `✅ DEPOSIT APPROVED!\nDeposit ID: ${deposit.id}\nUser: ${deposit.user_name} (${deposit.user_id})\nCredited: ${money(deposit.amount)}\nUser New Balance: ${money(user.wallet_balance)}`;
     const afterButtons = Markup.inlineKeyboard([
-      [Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`)]
+      [Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`)],
+      [Markup.button.callback(`🔙 Back to Deposits (Page ${backPage + 1})`, `adm:deposits:${backFilter}:${backPage}`)]
     ]);
     if (ctx.callbackQuery.message.photo) {
       await ctx.editMessageCaption(textMsg, afterButtons);
@@ -1982,15 +1964,18 @@ bot.action(/^adm_dep_app:(.+)$/, async (ctx) => {
   }
 });
 
-bot.action(/^adm_dep_rej:(.+)$/, async (ctx) => {
+bot.action(/^adm_dep_rej:([^:]+)(?::([^:]+):(\d+))?$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
   const depositId = ctx.match[1];
+  const backFilter = ctx.match[2] || "pending";
+  const backPage = Number(ctx.match[3]) || 0;
   try {
     const deposit = rejectDeposit(depositId);
-    const textMsg = `❌ DEPOSIT REJECTED!\nDeposit ID: ${deposit.id}\nUser: ${deposit.user_name}`;
+    const textMsg = `❌ DEPOSIT REJECTED!\nDeposit ID: ${deposit.id}\nUser: ${deposit.user_name} (${deposit.user_id})`;
     const afterButtons = Markup.inlineKeyboard([
-      [Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`)]
+      [Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`)],
+      [Markup.button.callback(`🔙 Back to Deposits (Page ${backPage + 1})`, `adm:deposits:${backFilter}:${backPage}`)]
     ]);
     if (ctx.callbackQuery.message.photo) {
       await ctx.editMessageCaption(textMsg, afterButtons);
@@ -2013,31 +1998,42 @@ bot.action(/^adm_dep_rej:(.+)$/, async (ctx) => {
 // =====================================================
 
 // WALLET
-async function showWallet(ctx) {
+async function showWallet(ctx, page = 0) {
   if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
   const user = getOrCreateUser(ctx.from);
   const deposits = getUserDeposits(user.id);
+  const pageSize = 8;
+  const pageCount = Math.max(1, Math.ceil(deposits.length / pageSize));
+  const curPage = Math.max(0, Math.min(Number(page) || 0, pageCount - 1));
+  const visible = deposits.slice(curPage * pageSize, (curPage + 1) * pageSize);
 
   let text = `👛 YOUR WALLET
 
 💰 Balance: ${money(user.wallet_balance)}
 💳 Total Spent: ${money(user.total_spent)}
 
-Recent Deposits:`;
+Recent Deposits (${deposits.length} Total${pageCount > 1 ? ` • Page ${curPage + 1}/${pageCount}` : ""}):`;
 
   if (deposits.length === 0) {
     text += `\n• No recent deposits found.`;
   } else {
-    deposits.slice(0, 5).forEach((d) => {
+    visible.forEach((d) => {
       const statusIcon = d.status === "approved" ? "✅" : d.status === "pending" ? "⏳" : "❌";
       text += `\n• ${statusIcon} ${d.id} — ${money(d.amount)} (${d.method}) [${d.status}]`;
     });
   }
 
-  const buttons = Markup.inlineKeyboard([
-    [Markup.button.callback("💳 Add Funds / Deposit", "deposit:start")],
-    [Markup.button.callback("🔙 Main Menu", "menu:main")]
-  ]);
+  const rows = [
+    [Markup.button.callback("💳 Add Funds / Deposit", "deposit:start")]
+  ];
+  if (pageCount > 1) {
+    const nav = [];
+    if (curPage > 0) nav.push(Markup.button.callback("⬅️ Prev Deposits", `wallet:deposits:${curPage - 1}`));
+    if (curPage < pageCount - 1) nav.push(Markup.button.callback("Next Deposits ➡️", `wallet:deposits:${curPage + 1}`));
+    if (nav.length) rows.push(nav);
+  }
+  rows.push([Markup.button.callback("🔙 Main Menu", "menu:main")]);
+  const buttons = Markup.inlineKeyboard(rows);
 
   if (ctx.callbackQuery) {
     try {
@@ -2047,6 +2043,10 @@ Recent Deposits:`;
   }
   await ctx.reply(text, buttons);
 }
+
+bot.action(/^wallet:deposits:(\d+)$/, async (ctx) => {
+  return showWallet(ctx, Number(ctx.match[1]) || 0);
+});
 
 // PROFILE
 async function showProfile(ctx) {
@@ -2078,7 +2078,7 @@ async function showProfile(ctx) {
 }
 
 // MY ORDERS
-async function showMyOrders(ctx) {
+async function showMyOrders(ctx, page = 0) {
   if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
   const user = getOrCreateUser(ctx.from);
   const orders = getUserOrders(user.id);
@@ -2095,13 +2095,26 @@ async function showMyOrders(ctx) {
     return ctx.reply(text, buttons);
   }
 
-  let text = `💰 MY ORDERS (Last 10)\nTap any order below to view full details and delivered codes:`;
-  const buttons = orders.slice(0, 10).map((o) => [
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(orders.length / pageSize));
+  const curPage = Math.max(0, Math.min(Number(page) || 0, pageCount - 1));
+  const visible = orders.slice(curPage * pageSize, (curPage + 1) * pageSize);
+
+  let text = `💰 MY ORDERS (${orders.length} Total • Page ${curPage + 1}/${pageCount})\nTap any order below to view full details and delivered codes:`;
+  const buttons = visible.map((o) => [
     Markup.button.callback(
       `📦 ${o.order_code} • ${o.product_name} (x${o.quantity})`,
       `view_ord:${o.order_code}`
     )
   ]);
+
+  if (pageCount > 1) {
+    const nav = [];
+    if (curPage > 0) nav.push(Markup.button.callback("⬅️ Previous", `menu:orders:${curPage - 1}`));
+    if (curPage < pageCount - 1) nav.push(Markup.button.callback("Next ➡️", `menu:orders:${curPage + 1}`));
+    if (nav.length) buttons.push(nav);
+  }
+
   buttons.push([Markup.button.callback("🔙 Main Menu", "menu:main")]);
 
   if (ctx.callbackQuery) {
@@ -2109,6 +2122,10 @@ async function showMyOrders(ctx) {
   }
   await ctx.reply(text, Markup.inlineKeyboard(buttons));
 }
+
+bot.action(/^menu:orders:(\d+)$/, async (ctx) => {
+  return showMyOrders(ctx, Number(ctx.match[1]) || 0);
+});
 
 bot.action(/^view_ord:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
@@ -2764,6 +2781,7 @@ bot.action("adm:menu", async (ctx) => {
 
 async function showAdminDashboard(ctx) {
   const pendingDeps = getPendingDeposits().length;
+  const totalDeps = getAllDeposits().length;
   const openTickets = getOpenTickets().length;
   const products = getProducts().length;
   const users = getAllUsers().length;
@@ -2777,15 +2795,15 @@ async function showAdminDashboard(ctx) {
 • Blocked Users: ${blockedCount}
 • Products: ${products}
 • Saved Promo Messages: ${totalPromos} Ready
-• Pending Deposits: ${pendingDeps}
+• Deposits: ${pendingDeps} Pending (${totalDeps} Total)
 • Open Support Tickets: ${openTickets}
 
 Select an action below:`;
 
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback(`🎯 1-Click Saved Promos (${totalPromos} Ready)`, "adm:promos:all:0")],
-    [Markup.button.callback(`📥 Pending Deposits (${pendingDeps})`, "adm:deposits")],
-    [Markup.button.callback(`🎫 Support Tickets (${openTickets} Open)`, "adm:tickets")],
+    [Markup.button.callback(`📥 Deposits Manager (${pendingDeps} Pending / ${totalDeps} All)`, "adm:deposits:pending:0")],
+    [Markup.button.callback(`🎫 Support Tickets (${openTickets} Open)`, "adm:tickets:open:0")],
     [Markup.button.callback("🛍️ Products & Inventory", "adm:products")],
     [Markup.button.callback("👥 Customers & Direct Messages", "adm:customers:0")],
     [Markup.button.callback(`🚫 Block / Unblock Users (${blockedCount} Blocked)`, "adm:blocked_menu")],
@@ -2811,45 +2829,89 @@ Select an action below:`;
   await ctx.reply(text, buttons);
 }
 
-// Admin: View Support Tickets List
-bot.action("adm:tickets", async (ctx) => {
-  if (!adminOnly(ctx)) return;
-  await ctx.answerCbQuery().catch(() => {});
-
-  const openList = getOpenTickets();
+// Admin: View Support Tickets List (Paginated & Filterable)
+async function showAdminTicketsMenu(ctx, filter = "open", page = 0) {
   const allList = getAllTickets();
-  const displayList = openList.length > 0 ? openList : allList.slice(0, 10);
+  const openList = allList.filter(t => t.status === "open" || t.status === "replied");
+  const resolvedList = allList.filter(t => t.status === "resolved");
 
-  if (displayList.length === 0) {
-    return ctx.reply(
-      "✅ No support tickets found.",
-      Markup.inlineKeyboard([[Markup.button.callback("🔙 Admin Menu", "adm:menu")]])
-    );
+  let activeFilter = filter;
+  if (activeFilter === "open" && openList.length === 0 && allList.length > 0) {
+    activeFilter = "all";
   }
 
-  const headerLabel = openList.length > 0
-    ? `🎫 <b>OPEN SUPPORT TICKETS (${openList.length})</b>`
-    : `🎫 <b>RECENT SUPPORT TICKETS (${displayList.length})</b>`;
+  const displayList = activeFilter === "open"
+    ? openList
+    : activeFilter === "resolved"
+      ? resolvedList
+      : allList;
 
-  const text = `${headerLabel}\n━━━━━━━━━━━━━━━━━━━━\nSelect a ticket below to view conversation, reply, or resolve:`;
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(displayList.length / pageSize));
+  const curPage = Math.max(0, Math.min(Number(page) || 0, pageCount - 1));
+  const visible = displayList.slice(curPage * pageSize, (curPage + 1) * pageSize);
 
-  const buttons = displayList.slice(0, 12).map((t) => {
+  const filterTitle = activeFilter === "open"
+    ? `🟢 OPEN / ACTIVE TICKETS (${openList.length})`
+    : activeFilter === "resolved"
+      ? `✅ RESOLVED TICKETS (${resolvedList.length})`
+      : `📋 ALL SUPPORT TICKETS (${allList.length})`;
+
+  const text = `🎫 <b>${filterTitle}</b>\n` +
+    `📄 <b>Page ${curPage + 1} of ${pageCount}</b> (Showing ${visible.length} of ${displayList.length})\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    (visible.length === 0
+      ? `✅ No tickets in this category.`
+      : `Select a ticket below to view conversation, reply, or resolve:`);
+
+  const rows = [
+    [
+      Markup.button.callback(`${activeFilter === "open" ? "🔘 " : ""}🟢 Open (${openList.length})`, "adm:tickets:open:0"),
+      Markup.button.callback(`${activeFilter === "resolved" ? "🔘 " : ""}✅ Resolved (${resolvedList.length})`, "adm:tickets:resolved:0"),
+      Markup.button.callback(`${activeFilter === "all" ? "🔘 " : ""}📋 All (${allList.length})`, "adm:tickets:all:0")
+    ]
+  ];
+
+  for (const t of visible) {
     const icon = t.status === "open" ? "🟢" : t.status === "replied" ? "💬" : "✅";
-    return [
+    rows.push([
       Markup.button.callback(
-        `${icon} #${t.id} — ${t.user_name} (${t.category.replace(/^[^\s]+\s/, "")})`,
+        `${icon} #${t.id} — ${t.user_name} (${t.user_id}) • ${t.category.replace(/^[^\s]+\s/, "")}`,
         `adm_tkt_view:${t.id}`
       )
-    ];
-  });
-  buttons.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
+    ]);
+  }
+
+  if (pageCount > 1) {
+    const nav = [];
+    if (curPage > 1) nav.push(Markup.button.callback("⏮️ First", `adm:tickets:${activeFilter}:0`));
+    if (curPage > 0) nav.push(Markup.button.callback("⬅️ Prev", `adm:tickets:${activeFilter}:${curPage - 1}`));
+    nav.push(Markup.button.callback(`📄 ${curPage + 1}/${pageCount}`, `adm:tickets:${activeFilter}:${curPage}`));
+    if (curPage < pageCount - 1) nav.push(Markup.button.callback("Next ➡️", `adm:tickets:${activeFilter}:${curPage + 1}`));
+    if (curPage < pageCount - 2) nav.push(Markup.button.callback("Last ⏭️", `adm:tickets:${activeFilter}:${pageCount - 1}`));
+    rows.push(nav);
+  }
+
+  rows.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
 
   if (ctx.callbackQuery) {
     try {
-      return await ctx.editMessageText(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(rows) });
     } catch (e) {}
   }
-  await ctx.reply(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+  return ctx.reply(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(rows) });
+}
+
+bot.action("adm:tickets", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  return showAdminTicketsMenu(ctx, "open", 0);
+});
+
+bot.action(/^adm:tickets:([^:]+):(\d+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  return showAdminTicketsMenu(ctx, ctx.match[1], Number(ctx.match[2]) || 0);
 });
 
 // Admin: View Individual Ticket
@@ -3273,10 +3335,15 @@ bot.action(/^adm:customers(?::(\d+))?$/, async (ctx) => {
     ]);
   }
 
-  const nav = [];
-  if (page > 0) nav.push(Markup.button.callback("⬅️ Previous", `adm:customers:${page - 1}`));
-  if (page < pageCount - 1) nav.push(Markup.button.callback("Next ➡️", `adm:customers:${page + 1}`));
-  if (nav.length) rows.push(nav);
+  if (pageCount > 1) {
+    const nav = [];
+    if (page > 1) nav.push(Markup.button.callback("⏮️ First", "adm:customers:0"));
+    if (page > 0) nav.push(Markup.button.callback("⬅️ Prev", `adm:customers:${page - 1}`));
+    nav.push(Markup.button.callback(`📄 ${page + 1}/${pageCount}`, `adm:customers:${page}`));
+    if (page < pageCount - 1) nav.push(Markup.button.callback("Next ➡️", `adm:customers:${page + 1}`));
+    if (page < pageCount - 2) nav.push(Markup.button.callback("Last ⏭️", `adm:customers:${pageCount - 1}`));
+    rows.push(nav);
+  }
   rows.push([
     Markup.button.callback("🆔 Message by ID", "adm:msg_by_id"),
     Markup.button.callback("🚫 Blocked Users", "adm:blocked_menu")
@@ -3347,57 +3414,184 @@ bot.action(/^adm:customer_msg:([^:]+)$/, async (ctx) => {
   return ctx.reply(promptText, markup);
 });
 
-// Admin: Pending Deposits
+// Admin: Deposits Manager with Multi-Page Pagination & Status Filters
+const DEPOSIT_PAGE_SIZE = 10;
+
+async function showAdminDepositsMenu(ctx, filter = "pending", page = 0) {
+  const allDeposits = getAllDeposits();
+  const pendingDeposits = allDeposits.filter(d => d.status === "pending");
+  const approvedDeposits = allDeposits.filter(d => d.status === "approved");
+  const rejectedDeposits = allDeposits.filter(d => d.status === "rejected");
+
+  let activeFilter = String(filter || "pending").toLowerCase();
+  if (!["pending", "approved", "rejected", "all"].includes(activeFilter)) {
+    activeFilter = "pending";
+  }
+
+  const filteredList = activeFilter === "pending"
+    ? pendingDeposits
+    : activeFilter === "approved"
+      ? approvedDeposits
+      : activeFilter === "rejected"
+        ? rejectedDeposits
+        : allDeposits;
+
+  const pageCount = Math.max(1, Math.ceil(filteredList.length / DEPOSIT_PAGE_SIZE));
+  const curPage = Math.max(0, Math.min(Number(page) || 0, pageCount - 1));
+  const startIdx = curPage * DEPOSIT_PAGE_SIZE;
+  const visible = filteredList.slice(startIdx, startIdx + DEPOSIT_PAGE_SIZE);
+
+  const filterLabelMap = {
+    pending: `⏳ PENDING DEPOSITS (${pendingDeposits.length})`,
+    approved: `✅ APPROVED DEPOSITS (${approvedDeposits.length})`,
+    rejected: `❌ REJECTED DEPOSITS (${rejectedDeposits.length})`,
+    all: `📋 ALL DEPOSITS (${allDeposits.length})`
+  };
+
+  let text = `📥 <b>ADMIN DEPOSITS MANAGER</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `📂 <b>View:</b> ${filterLabelMap[activeFilter]}\n` +
+    `📊 <b>Summary:</b> ⏳ Pending: <b>${pendingDeposits.length}</b> | ✅ Approved: <b>${approvedDeposits.length}</b> | ❌ Rejected: <b>${rejectedDeposits.length}</b> | 📋 Total: <b>${allDeposits.length}</b>\n` +
+    `📄 <b>Page ${curPage + 1} of ${pageCount}</b>` +
+    (filteredList.length > 0 ? ` <i>(Showing #${startIdx + 1}–#${startIdx + visible.length} of ${filteredList.length})</i>` : "") +
+    `\n━━━━━━━━━━━━━━━━━━━━\n`;
+
+  if (visible.length === 0) {
+    text += `\n✅ No deposits found in <b>${activeFilter.toUpperCase()}</b> list.\n<i>Use the filter tabs below to view Approved, Rejected, or All deposits.</i>`;
+  } else {
+    visible.forEach((d, idx) => {
+      const num = startIdx + idx + 1;
+      const statusBadge = d.status === "approved" ? "✅" : d.status === "pending" ? "⏳" : "❌";
+      const uName = escapeHtml(d.user_name || "Customer");
+      const uid = escapeHtml(String(d.user_id || ""));
+      const method = escapeHtml(d.method || "CRYPTO");
+      text += `\n<b>${num}.</b> ${statusBadge} <code>${escapeHtml(d.id)}</code> — <b>${money(d.amount)}</b> (${method})\n` +
+        `   👤 ${uName} • 🆔 <code>${uid}</code>\n`;
+    });
+    text += `\n👇 <i>Tap any deposit button below to view full details, proof/screenshot, Approve/Reject, or message the user:</i>`;
+  }
+
+  const rows = [
+    [
+      Markup.button.callback(`${activeFilter === "pending" ? "🔘 " : ""}⏳ Pending (${pendingDeposits.length})`, "adm:deposits:pending:0"),
+      Markup.button.callback(`${activeFilter === "approved" ? "🔘 " : ""}✅ Approved (${approvedDeposits.length})`, "adm:deposits:approved:0")
+    ],
+    [
+      Markup.button.callback(`${activeFilter === "rejected" ? "🔘 " : ""}❌ Rejected (${rejectedDeposits.length})`, "adm:deposits:rejected:0"),
+      Markup.button.callback(`${activeFilter === "all" ? "🔘 " : ""}📋 All (${allDeposits.length})`, "adm:deposits:all:0")
+    ]
+  ];
+
+  for (let i = 0; i < visible.length; i++) {
+    const d = visible[i];
+    const num = startIdx + i + 1;
+    const statusIcon = d.status === "approved" ? "✅" : d.status === "pending" ? "⏳" : "❌";
+    const shortUser = safeLabelSlice(d.user_name || "User", 12);
+    rows.push([
+      Markup.button.callback(
+        `${num}. ${statusIcon} ${d.id} • ${money(d.amount)} • ${shortUser} (${d.user_id})`,
+        `adm_view_dep:${d.id}:${activeFilter}:${curPage}`
+      )
+    ]);
+  }
+
+  if (pageCount > 1) {
+    const nav = [];
+    if (curPage > 1) {
+      nav.push(Markup.button.callback("⏮️ First", `adm:deposits:${activeFilter}:0`));
+    }
+    if (curPage > 0) {
+      nav.push(Markup.button.callback("⬅️ Prev", `adm:deposits:${activeFilter}:${curPage - 1}`));
+    }
+    nav.push(Markup.button.callback(`📄 ${curPage + 1}/${pageCount}`, `adm:deposits:${activeFilter}:${curPage}`));
+    if (curPage < pageCount - 1) {
+      nav.push(Markup.button.callback("Next ➡️", `adm:deposits:${activeFilter}:${curPage + 1}`));
+    }
+    if (curPage < pageCount - 2) {
+      nav.push(Markup.button.callback("Last ⏭️", `adm:deposits:${activeFilter}:${pageCount - 1}`));
+    }
+    rows.push(nav);
+  }
+
+  rows.push([
+    Markup.button.callback("🔄 Refresh Page", `adm:deposits:${activeFilter}:${curPage}`),
+    Markup.button.callback("🔙 Admin Menu", "adm:menu")
+  ]);
+
+  const markup = { parse_mode: "HTML", ...Markup.inlineKeyboard(rows) };
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, markup);
+    } catch (e) {}
+  }
+  return ctx.reply(text, markup);
+}
+
 bot.action("adm:deposits", async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
-
-  const list = getPendingDeposits();
-  if (list.length === 0) {
-    return ctx.reply("✅ No pending deposits.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Admin Menu", "adm:menu")]]));
-  }
-
-  let text = `📥 PENDING DEPOSITS (${list.length}):\n`;
-  const buttons = list.slice(0, 10).map((d) => [
-    Markup.button.callback(
-      `🔍 ${d.id} • ${money(d.amount)} (${d.user_name})`,
-      `adm_view_dep:${d.id}`
-    )
-  ]);
-  buttons.push([Markup.button.callback("🔙 Admin Menu", "adm:menu")]);
-
-  await ctx.reply(text, Markup.inlineKeyboard(buttons));
+  return showAdminDepositsMenu(ctx, "pending", 0);
 });
 
-bot.action(/^adm_view_dep:(.+)$/, async (ctx) => {
+bot.action(/^adm:deposits:([^:]+):(\d+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
-  const deposit = getDeposit(ctx.match[1]);
-  if (!deposit) return ctx.reply("Deposit not found.");
+  const filter = ctx.match[1] || "pending";
+  const page = Number(ctx.match[2]) || 0;
+  return showAdminDepositsMenu(ctx, filter, page);
+});
 
-  const msg = `Deposit: ${deposit.id}
-User: ${deposit.user_name} (${deposit.user_id})
-Amount: ${money(deposit.amount)}
-Method: ${deposit.method}
-Proof: ${deposit.proof || "None"}
-Status: ${deposit.status}`;
+bot.action(/^adm_view_dep:([^:]+)(?::([^:]+):(\d+))?$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  const depositId = ctx.match[1];
+  const backFilter = ctx.match[2] || "pending";
+  const backPage = Number(ctx.match[3]) || 0;
 
-  const buttons = Markup.inlineKeyboard([
-    [
-      Markup.button.callback("✅ Approve", `adm_dep_app:${deposit.id}`),
-      Markup.button.callback("❌ Reject", `adm_dep_rej:${deposit.id}`)
-    ],
-    [
-      Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`),
-      Markup.button.callback("🚫 Block User", `adm:block_user:${deposit.user_id}`)
-    ],
-    [Markup.button.callback("🔙 Pending List", "adm:deposits")]
+  const deposit = getDeposit(depositId);
+  if (!deposit) return ctx.reply("❌ Deposit not found.");
+
+  const statusBadge = deposit.status === "approved" ? "✅ APPROVED" : deposit.status === "pending" ? "⏳ PENDING" : "❌ REJECTED";
+  const createdStr = deposit.created_at ? new Date(deposit.created_at).toLocaleString() : "N/A";
+  const msg = `📥 <b>DEPOSIT DETAILS: ${escapeHtml(deposit.id)}</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `👤 <b>User:</b> ${escapeHtml(deposit.user_name || "Customer")}\n` +
+    `🆔 <b>Telegram ID:</b> <code>${escapeHtml(String(deposit.user_id || ""))}</code>\n` +
+    `💵 <b>Amount:</b> <b>${money(deposit.amount)}</b>\n` +
+    `💳 <b>Method:</b> ${escapeHtml(deposit.method || "CRYPTO")}\n` +
+    `🧾 <b>Proof / TxID:</b> <code>${escapeHtml(deposit.proof || "None")}</code>\n` +
+    `📌 <b>Status:</b> ${statusBadge}\n` +
+    `🕒 <b>Created:</b> ${escapeHtml(createdStr)}`;
+
+  const actionRows = [];
+  if (deposit.status === "pending") {
+    actionRows.push([
+      Markup.button.callback("✅ Approve", `adm_dep_app:${deposit.id}:${backFilter}:${backPage}`),
+      Markup.button.callback("❌ Reject", `adm_dep_rej:${deposit.id}:${backFilter}:${backPage}`)
+    ]);
+  }
+  actionRows.push([
+    Markup.button.callback("👤 Customer Profile", `adm:customer:${deposit.user_id}`),
+    Markup.button.callback("✉️ Send Message", `adm:customer_msg:${deposit.user_id}`)
+  ]);
+  actionRows.push([
+    Markup.button.callback("🚫 Block User", `adm:block_user:${deposit.user_id}`)
+  ]);
+  actionRows.push([
+    Markup.button.callback(`🔙 Back to Deposits (Page ${backPage + 1})`, `adm:deposits:${backFilter}:${backPage}`)
   ]);
 
+  const buttons = Markup.inlineKeyboard(actionRows);
+
   if (deposit.photo_file_id) {
-    await ctx.replyWithPhoto(deposit.photo_file_id, { caption: msg, ...buttons });
+    await ctx.replyWithPhoto(deposit.photo_file_id, { caption: msg, parse_mode: "HTML", ...buttons });
   } else {
-    await ctx.reply(msg, buttons);
+    if (ctx.callbackQuery && !ctx.callbackQuery.message?.photo) {
+      try {
+        return await ctx.editMessageText(msg, { parse_mode: "HTML", ...buttons });
+      } catch (e) {}
+    }
+    await ctx.reply(msg, { parse_mode: "HTML", ...buttons });
   }
 });
 

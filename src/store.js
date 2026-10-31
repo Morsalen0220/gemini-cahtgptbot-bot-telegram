@@ -2029,8 +2029,14 @@ function getPendingDeposits() {
   return load().deposits.filter(d => d.status === "pending").reverse();
 }
 
+function getAllDeposits(statusFilter = null) {
+  const all = [...(load().deposits || [])].reverse();
+  if (!statusFilter || statusFilter === "all") return all;
+  return all.filter(d => String(d.status || "").toLowerCase() === String(statusFilter).toLowerCase());
+}
+
 function getUserDeposits(userId) {
-  return load().deposits.filter(d => String(d.user_id) === String(userId)).slice(-15).reverse();
+  return load().deposits.filter(d => String(d.user_id) === String(userId)).reverse();
 }
 
 // ----------------------------------------------------
@@ -2090,11 +2096,11 @@ function getOrder(code) {
 }
 
 function getUserOrders(userId) {
-  return load().orders.filter(o => String(o.user_id) === String(userId)).slice(-20).reverse();
+  return load().orders.filter(o => String(o.user_id) === String(userId)).reverse();
 }
 
 function getAllOrders() {
-  return load().orders.slice(-50).reverse();
+  return [...(load().orders || [])].reverse();
 }
 
 function setUserVerified(userId, isVerified = true) {
@@ -2439,6 +2445,7 @@ module.exports = {
   approveDeposit,
   rejectDeposit,
   getPendingDeposits,
+  getAllDeposits,
   getUserDeposits,
   createOrder,
   getOrder,

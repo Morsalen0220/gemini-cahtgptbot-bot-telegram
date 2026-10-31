@@ -600,6 +600,108 @@ Explore <b>8 Multi-Plan Categories</b> & <b>28+ Direct Subscriptions</b> ready f
 
 🔥 <b>5+ Items = 10% OFF • Up to 30% OFF on Bulk!</b>
 👇 <b>Tap "🛍️ Buy Now" below to browse the live catalog!</b>`
+  },
+  {
+    id: "promo_41",
+    category: "other",
+    title: "💬 ChatGPT Plus (GPT-4o, o1, Voice & DALL·E 3) — From $1.80!",
+    content: `💬 <b>UNLOCK OPENAI CHATGPT PLUS & TEAM WORKSPACE!</b>
+━━━━━━━━━━━━━━━━━━━━
+Why pay $20/month when you can get full <b>ChatGPT Plus (GPT-4o, o1 Reasoning, Advanced Voice & DALL·E 3)</b> at wholesale prices?
+
+1️⃣ <b>ChatGPT Plus — 1 Month (Shared):</b> <b>$1.80</b>
+2️⃣ <b>ChatGPT Plus — 1 Month (100% Private Account):</b> <b>$5.50</b>
+3️⃣ <b>ChatGPT Team Workspace — 1 Month (On Your Own Email):</b> <b>$7.50</b>
+
+🔥 <b>Buy 5+ items and get 10% to 30% Bulk Discount automatically!</b>
+🛡️ <b>Guarantee:</b> 48 Hours Replacement Guarantee + 30-Day Full Warranty
+⚡ <b>Delivery:</b> 100% Instant Automated Delivery in Bot!`
+  },
+  {
+    id: "promo_42",
+    category: "other",
+    title: "🧠 Claude 3.5 Sonnet Pro & Team Workspace — 6 Official Plans!",
+    content: `🧠 <b>ANTHROPIC CLAUDE 3.5 SONNET PRO — THE #1 CODING & WRITING AI!</b>
+━━━━━━━━━━━━━━━━━━━━
+Experience 200K context window, Artifacts, Projects & priority bandwidth with our 6 flexible <b>Claude AI</b> plans:
+
+• <b>Claude 3.5 Sonnet Pro — 7 Days:</b> <b>$1.50</b>
+• <b>Claude Pro — 1 Month (Shared):</b> <b>$4.50</b>
+• <b>Claude Pro — 1 Month (100% Private Account):</b> <b>$9.50</b>
+• <b>Claude Pro — 1 Month (On Your Personal Email):</b> <b>$12.50</b>
+• <b>Claude Team Plan — 1 Month (Private Workspace Seat):</b> <b>$15.00</b>
+• <b>Claude Pro — 3 Months (100% Private):</b> <b>$24.00</b>
+
+🔥 <b>5+ Bulk Orders get 10% to 30% OFF automatically!</b>
+🛡️ <b>Guarantee:</b> 48 Hours Replacement Guarantee • Instant Delivery 24/7!`
+  },
+  {
+    id: "promo_43",
+    category: "other",
+    title: "🔥 Ultimate AI Duo: ChatGPT Plus + Claude 3.5 Sonnet Pro!",
+    content: `🔥 <b>THE ULTIMATE AI DUO: CHATGPT PLUS + CLAUDE 3.5 SONNET PRO!</b>
+━━━━━━━━━━━━━━━━━━━━
+Top developers, writers, and marketers combine <b>ChatGPT</b> & <b>Claude AI</b> for maximum productivity:
+
+💬 <b>ChatGPT Plus / Team (3 Plans):</b>
+• Shared 1M: <b>$1.80</b> | Private 1M: <b>$5.50</b> | Team (On Your Email): <b>$7.50</b>
+
+🧠 <b>Claude 3.5 Sonnet Pro (6 Plans):</b>
+• 7 Days: <b>$1.50</b> | Shared 1M: <b>$4.50</b> | Private 1M: <b>$9.50</b> | On Your Email: <b>$12.50</b>
+
+💎 <b>Bonus:</b> Add <b>Gemini Advanced 18M (+5TB Storage)</b> for just <b>$0.30</b>!
+🛡️ <b>48 Hours Replacement Guarantee</b> • Instant Automated Delivery!`
+  },
+  {
+    id: "promo_44",
+    category: "other",
+    title: "📧 Upgrade ChatGPT & Claude Directly on Your Own Email!",
+    content: `📧 <b>WANT CHATGPT OR CLAUDE ON YOUR OWN PERSONAL EMAIL?</b>
+━━━━━━━━━━━━━━━━━━━━
+No shared logins needed! Get an official upgrade or private workspace seat directly on your own email address:
+
+✅ <b>ChatGPT Team Workspace — 1 Month (On Your Email):</b> <b>$7.50</b>
+   <i>(2x higher message limits than Plus • 100% private history)</i>
+
+✅ <b>Claude Pro — 1 Month (On Your Email):</b> <b>$12.50</b>
+   <i>(Direct official activation on your personal account)</i>
+
+✅ <b>Claude Team Plan — 1 Month (Private Seat):</b> <b>$15.00</b>
+   <i>(Highest message quota • 200K Context & Projects)</i>
+
+🛡️ <b>48 Hours Replacement Guarantee</b> • Instant Delivery in Bot!`
+  },
+  {
+    id: "promo_45",
+    category: "other",
+    title: "🔑 ChatGPT OpenAI & Claude 3.5 Sonnet API Keys in Stock!",
+    content: `🔑 <b>PRE-FUNDED CHATGPT & CLAUDE API KEYS FOR DEVELOPERS!</b>
+━━━━━━━━━━━━━━━━━━━━
+Using <b>Cursor, Cline, Roo-Code, Windsurf, SillyTavern</b> or building your own AI bots? Grab high-tier API keys with instant delivery:
+
+• <b>ChatGPT / OpenAI API Key (GPT-4o & o1 Tier):</b> <b>$4.50</b>
+• <b>Claude 3.5 Sonnet API Key (200K Context):</b> <b>$6.50</b>
+• <b>Gemini 1.5 Pro Official API Key:</b> <b>$3.50</b>
+• <b>DeepSeek V3 / R1 API Key:</b> <b>$2.50</b>
+
+🔥 <b>Buy 5+ Keys for 10% to 30% OFF!</b>
+🛡️ <b>48 Hours Replacement Guarantee</b> • Tap <b>🆙 API Key</b> in the bot!`
+  },
+  {
+    id: "promo_46",
+    category: "other",
+    title: "⚡ Budget AI Starter: ChatGPT Plus ($1.80) & Claude Pro ($1.50)!",
+    content: `⚡ <b>TRY CHATGPT PLUS & CLAUDE PRO FOR UNDER $2.00!</b>
+━━━━━━━━━━━━━━━━━━━━
+Want to test premium AI models without spending $20/month? Start today for less than the price of a coffee:
+
+💬 <b>ChatGPT Plus 1 Month (GPT-4o & o1):</b> Only <b>$1.80!</b>
+🧠 <b>Claude 3.5 Sonnet Pro (7 Days Access):</b> Only <b>$1.50!</b>
+💎 <b>Gemini Advanced 18 Months (+5TB Cloud):</b> Only <b>$0.30!</b>
+
+✅ Instant automated delivery in 2 seconds
+🛡️ <b>48 Hours Replacement Guarantee</b> on every order!
+👇 <b>Tap "🛍️ Buy Now" below to grab yours!</b>`
   }
 ];
 

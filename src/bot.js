@@ -369,6 +369,22 @@ async function purgeUserChatMessages(userId) {
   }
 
   clearUserSentMessageIds(targetId);
+
+  // Also unpin all pinned messages and wipe the "/" command menu for this blocked user's chat
+  try {
+    await rawCallApi("unpinAllChatMessages", { chat_id: targetId }).catch(() => {});
+    if (/^\d+$/.test(targetId)) {
+      await rawCallApi("setMyCommands", {
+        commands: [],
+        scope: { type: "chat", chat_id: Number(targetId) }
+      }).catch(() => {});
+      await rawCallApi("setChatMenuButton", {
+        chat_id: Number(targetId),
+        menu_button: { type: "default" }
+      }).catch(() => {});
+    }
+  } catch (_) {}
+
   return { deletedCount: Math.max(deletedCount, uniqueTracked.length) };
 }
 
@@ -377,7 +393,61 @@ async function blockUserAndPurge(userId) {
   // Purge messages first (while probe can still be sent if needed), then mark blocked
   setUserBlocked(targetId, true);
   const purgeRes = await purgeUserChatMessages(targetId);
+
+  // Also ban the user from the Official Channel and Group so they cannot see or find the bot link there
+  try {
+    const settings = getAllSettings();
+    if (settings.channel_id && /^\d+$/.test(targetId)) {
+      await rawCallApi("banChatMember", {
+        chat_id: settings.channel_id,
+        user_id: Number(targetId),
+        revoke_messages: true
+      }).catch(() => {});
+    }
+    if (settings.group_id && /^\d+$/.test(targetId)) {
+      await rawCallApi("banChatMember", {
+        chat_id: settings.group_id,
+        user_id: Number(targetId),
+        revoke_messages: true
+      }).catch(() => {});
+    }
+  } catch (_) {}
+
   return { user: getUser(targetId), ...purgeRes };
+}
+
+async function unblockUserAndRestore(userId) {
+  const targetId = String(userId).trim();
+  const user = setUserBlocked(targetId, false);
+
+  try {
+    const settings = getAllSettings();
+    if (/^\d+$/.test(targetId)) {
+      await rawCallApi("deleteMyCommands", {
+        scope: { type: "chat", chat_id: Number(targetId) }
+      }).catch(() => {});
+      await rawCallApi("setChatMenuButton", {
+        chat_id: Number(targetId),
+        menu_button: { type: "commands" }
+      }).catch(() => {});
+    }
+    if (settings.channel_id && /^\d+$/.test(targetId)) {
+      await rawCallApi("unbanChatMember", {
+        chat_id: settings.channel_id,
+        user_id: Number(targetId),
+        only_if_banned: true
+      }).catch(() => {});
+    }
+    if (settings.group_id && /^\d+$/.test(targetId)) {
+      await rawCallApi("unbanChatMember", {
+        chat_id: settings.group_id,
+        user_id: Number(targetId),
+        only_if_banned: true
+      }).catch(() => {});
+    }
+  } catch (_) {}
+
+  return user;
 }
 
 // =====================================================
@@ -397,6 +467,9 @@ bot.use(async (ctx, next) => {
 
     // If user is blocked (and not admin), give ZERO response and delete any old bot message they interacted with
     if (!isAdmin(ctx) && isUserBlocked(fromId)) {
+      if (ctx.callbackQuery) {
+        await ctx.answerCbQuery().catch(() => {});
+      }
       if (ctx.callbackQuery?.message?.message_id && ctx.chat?.id) {
         rawCallApi("deleteMessage", {
           chat_id: ctx.chat.id,
@@ -3130,7 +3203,7 @@ bot.command("unblock", async (ctx) => {
   if (!targetId) {
     return ctx.reply("❌ User not found. Please provide a numeric Telegram ID.");
   }
-  const user = setUserBlocked(targetId, false);
+  const user = await unblockUserAndRestore(targetId);
   const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || targetId) : targetId;
   return ctx.reply(
     `🟢 User Unblocked!\n\n👤 User: ${name} (ID: ${targetId})\nStatus: Active again.`,
@@ -3256,7 +3329,7 @@ bot.action(/^adm:unblock_user:([^:]+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   const targetId = String(ctx.match[1]).trim();
   await ctx.answerCbQuery("🟢 User unblocked!").catch(() => {});
-  const user = setUserBlocked(targetId, false);
+  const user = await unblockUserAndRestore(targetId);
   const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || targetId) : targetId;
 
   const msg = `🟢 USER UNBLOCKED\n━━━━━━━━━━━━━━━━━━━━\n👤 User: ${name}\n🆔 Telegram ID: ${targetId}\n✅ Status: Active (Can now use the bot and receive messages again).`;
@@ -5421,7 +5494,7 @@ async function handleAdminTextInput(ctx, rawText) {
           Markup.inlineKeyboard([[Markup.button.callback("🔙 Blocked Users Menu", "adm:blocked_menu")]])
         );
       }
-      const user = setUserBlocked(targetId, false);
+      const user = await unblockUserAndRestore(targetId);
       const name = user ? ([user.first_name, user.last_name].filter(Boolean).join(" ") || targetId) : targetId;
       return ctx.reply(
         `🟢 User Unblocked Successfully!\n\n👤 User: ${name} (ID: ${targetId})\n✅ Status: Active again.`,

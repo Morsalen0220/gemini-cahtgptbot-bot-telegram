@@ -816,19 +816,29 @@ bot.command(["deposit", "addfunds", "topup"], async (ctx) => {
   clearAdminConflictingSession(ctx);
   const settings = getAllSettings();
   const minCrypto = Number(settings.min_crypto_deposit || 1.00);
+  const binanceEnabled = settings.binance_pay_enabled !== false;
+
+  const methodBullets = [];
+  if (binanceEnabled) {
+    methodBullets.push(`• <b>Binance Pay:</b> Binance ID / Pay ID (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)`);
+  }
+  methodBullets.push(`• <b>USDT (BEP20):</b> BNB Smart Chain (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)`);
+  methodBullets.push(`• <b>USDT (Polygon):</b> Polygon / POL (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)`);
+
   const text = `💳 <b>SELECT DEPOSIT METHOD</b>
 ━━━━━━━━━━━━━━━━━━━
 Please choose your preferred deposit gateway:
-• <b>Binance Pay:</b> Binance ID / Pay ID (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)
-• <b>USDT (BEP20):</b> BNB Smart Chain (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)
-• <b>USDT (Polygon):</b> Polygon / POL (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)`;
+${methodBullets.join("\n")}`;
 
-  const buttons = Markup.inlineKeyboard([
-    [Markup.button.callback("🟡 Binance Pay (Binance ID)", `deposit:binance:${minCrypto}`)],
-    [Markup.button.callback("🟡 USDT (BEP20 / BSC)", `deposit:bep20:${minCrypto}`)],
-    [Markup.button.callback("🟣 USDT (Polygon / POL)", `deposit:polygon:${minCrypto}`)],
-    [Markup.button.callback("🔙 Back to Wallet", "menu:wallet")]
-  ]);
+  const rows = [];
+  if (binanceEnabled) {
+    rows.push([Markup.button.callback("🟡 Binance Pay (Binance ID)", `deposit:binance:${minCrypto}`)]);
+  }
+  rows.push([Markup.button.callback("🟡 USDT (BEP20 / BSC)", `deposit:bep20:${minCrypto}`)]);
+  rows.push([Markup.button.callback("🟣 USDT (Polygon / POL)", `deposit:polygon:${minCrypto}`)]);
+  rows.push([Markup.button.callback("🔙 Back to Wallet", "menu:wallet")]);
+
+  const buttons = Markup.inlineKeyboard(rows);
   return ctx.reply(text, { parse_mode: "HTML", ...buttons });
 });
 
@@ -1448,20 +1458,29 @@ bot.action(/^deposit:start(?::([\d.]+))?$/, async (ctx) => {
   const suggestedAmount = ctx.match[1] ? Number(ctx.match[1]) : 1.0;
   const settings = getAllSettings();
   const minCrypto = Number(settings.min_crypto_deposit || 1.00);
+  const binanceEnabled = settings.binance_pay_enabled !== false;
+
+  const methodBullets = [];
+  if (binanceEnabled) {
+    methodBullets.push(`• <b>Binance Pay:</b> Binance ID / Pay ID (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)`);
+  }
+  methodBullets.push(`• <b>USDT (BEP20):</b> BNB Smart Chain (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)`);
+  methodBullets.push(`• <b>USDT (Polygon):</b> Polygon / POL (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)`);
 
   const text = `💳 <b>SELECT DEPOSIT METHOD</b>
 ━━━━━━━━━━━━━━━━━━━
 Please choose your preferred deposit gateway:
-• <b>Binance Pay:</b> Binance ID / Pay ID (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)
-• <b>USDT (BEP20):</b> BNB Smart Chain (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)
-• <b>USDT (Polygon):</b> Polygon / POL (Min: <b>$${minCrypto.toFixed(2)} USDT</b>)`;
+${methodBullets.join("\n")}`;
 
-  const buttons = Markup.inlineKeyboard([
-    [Markup.button.callback("🟡 Binance Pay (Binance ID)", `deposit:binance:${suggestedAmount}`)],
-    [Markup.button.callback("🟡 USDT (BEP20 / BSC)", `deposit:bep20:${suggestedAmount}`)],
-    [Markup.button.callback("🟣 USDT (Polygon / POL)", `deposit:polygon:${suggestedAmount}`)],
-    [Markup.button.callback("🔙 Back to Wallet", "menu:wallet")]
-  ]);
+  const rows = [];
+  if (binanceEnabled) {
+    rows.push([Markup.button.callback("🟡 Binance Pay (Binance ID)", `deposit:binance:${suggestedAmount}`)]);
+  }
+  rows.push([Markup.button.callback("🟡 USDT (BEP20 / BSC)", `deposit:bep20:${suggestedAmount}`)]);
+  rows.push([Markup.button.callback("🟣 USDT (Polygon / POL)", `deposit:polygon:${suggestedAmount}`)]);
+  rows.push([Markup.button.callback("🔙 Back to Wallet", "menu:wallet")]);
+
+  const buttons = Markup.inlineKeyboard(rows);
 
   if (ctx.callbackQuery) {
     try {
@@ -1474,6 +1493,19 @@ Please choose your preferred deposit gateway:
 // Binance Pay deposit
 bot.action(/^deposit:binance(?::([\d.]+))?$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
+  const settings = getAllSettings();
+  if (settings.binance_pay_enabled === false) {
+    return ctx.reply(
+      "❌ <b>Binance Pay is currently disabled by admin.</b>\nPlease choose another deposit method below:",
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("💳 Choose Other Method", "deposit:start")],
+          [Markup.button.callback("🔙 Back to Wallet", "menu:wallet")]
+        ])
+      }
+    );
+  }
   const amount = ctx.match[1] ? Number(ctx.match[1]) : 1.0;
   await showBinanceDepositInstructions(ctx, amount);
 });
@@ -1594,9 +1626,15 @@ async function showBep20DepositInstructions(ctx, amount) {
 ━━━━━━━━━━━━━━━━━━━━
 ${desc}`;
 
+  const bep20SwitchRow = [];
+  if (settings.binance_pay_enabled !== false) {
+    bep20SwitchRow.push(Markup.button.callback("🟡 Binance Pay", `deposit:binance:${finalAmount}`));
+  }
+  bep20SwitchRow.push(Markup.button.callback("🟣 Switch to Polygon", `deposit:polygon:${finalAmount}`));
+
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback("✅ I've Paid", `deposit_paid:${deposit.id}`)],
-    [Markup.button.callback("🟡 Binance Pay", `deposit:binance:${finalAmount}`), Markup.button.callback("🟣 Switch to Polygon", `deposit:polygon:${finalAmount}`)],
+    bep20SwitchRow,
     [Markup.button.callback("🔙 Choose Method", "deposit:start"), Markup.button.callback("❌ Cancel", "menu:wallet")]
   ]);
 
@@ -1646,9 +1684,15 @@ async function showPolygonDepositInstructions(ctx, amount) {
 • Send only <b>USDT</b> on <b>Polygon</b> network.
 • After payment, tap <b>"✅ I've Paid"</b> below to send proof.`;
 
+  const polygonSwitchRow = [];
+  if (settings.binance_pay_enabled !== false) {
+    polygonSwitchRow.push(Markup.button.callback("🟡 Binance Pay", `deposit:binance:${finalAmount}`));
+  }
+  polygonSwitchRow.push(Markup.button.callback("🟡 Switch to BEP20", `deposit:bep20:${finalAmount}`));
+
   const buttons = Markup.inlineKeyboard([
     [Markup.button.callback("✅ I've Paid", `deposit_paid:${deposit.id}`)],
-    [Markup.button.callback("🟡 Binance Pay", `deposit:binance:${finalAmount}`), Markup.button.callback("🟡 Switch to BEP20", `deposit:bep20:${finalAmount}`)],
+    polygonSwitchRow,
     [Markup.button.callback("🔙 Choose Method", "deposit:start"), Markup.button.callback("❌ Cancel", "menu:wallet")]
   ]);
 
@@ -4296,15 +4340,15 @@ bot.action("adm:user_bal", async (ctx) => {
 });
 
 // Admin: Settings & Force Join
-bot.action("adm:settings", async (ctx) => {
-  if (!adminOnly(ctx)) return;
-  await ctx.answerCbQuery().catch(() => {});
+async function renderAdminSettings(ctx) {
   const s = getAllSettings();
   const minCrypto = Number(s.min_crypto_deposit ?? 1.00);
+  const binanceActive = s.binance_pay_enabled !== false;
 
   const text = `⚙️ BOT SETTINGS & CONFIGURATION:
 
 • Force Join Enabled: ${s.force_join_enabled ? "✅ YES" : "❌ NO"}
+• Binance Pay Status: ${binanceActive ? "🟢 ENABLED (ON)" : "🔴 DISABLED (OFF)"}
 • Channel ID: ${s.channel_id || "Not Set"}
 • Channel Link: ${s.channel_link || "Not Set"}
 • Group ID: ${s.group_id || "Not Set"}
@@ -4322,7 +4366,10 @@ bot.action("adm:settings", async (ctx) => {
 • Group Deposits Broadcast: ${s.fake_deposits_broadcast_enabled !== false ? "✅ ENABLED (~20 mins)" : "❌ DISABLED"}`;
 
   const buttons = Markup.inlineKeyboard([
-    [Markup.button.callback(s.force_join_enabled ? "🔴 Disable Force Join" : "🟢 Enable Force Join", "adm_toggle_fj")],
+    [
+      Markup.button.callback(s.force_join_enabled ? "🔴 Disable Force Join" : "🟢 Enable Force Join", "adm_toggle_fj"),
+      Markup.button.callback(binanceActive ? "🔴 Turn OFF Binance Pay" : "🟢 Turn ON Binance Pay", "adm_toggle_binance_pay")
+    ],
     [
       Markup.button.callback(s.fake_sales_broadcast_enabled !== false ? "🔴 Sales Off" : "🟢 Sales On", "adm_toggle_fake_sales"),
       Markup.button.callback(s.fake_deposits_broadcast_enabled !== false ? "🔴 Deposits Off" : "🟢 Deposits On", "adm_toggle_fake_deps")
@@ -4346,7 +4393,22 @@ bot.action("adm:settings", async (ctx) => {
       return await ctx.editMessageText(text, buttons);
     } catch (e) {}
   }
-  await ctx.reply(text, buttons);
+  return await ctx.reply(text, buttons);
+}
+
+bot.action("adm:settings", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  return renderAdminSettings(ctx);
+});
+
+bot.action("adm_toggle_binance_pay", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const current = getSetting("binance_pay_enabled") !== false;
+  const nextState = !current;
+  setSetting("binance_pay_enabled", nextState);
+  await ctx.answerCbQuery(nextState ? "🟢 Binance Pay turned ON!" : "🔴 Binance Pay turned OFF!", { show_alert: true }).catch(() => {});
+  return renderAdminSettings(ctx);
 });
 
 bot.action("adm_test_dep_broadcast", async (ctx) => {
@@ -4377,26 +4439,26 @@ bot.action("adm_test_sale_broadcast", async (ctx) => {
 
 bot.action("adm_toggle_fake_sales", async (ctx) => {
   if (!adminOnly(ctx)) return;
-  await ctx.answerCbQuery().catch(() => {});
   const current = getSetting("fake_sales_broadcast_enabled") !== false;
   setSetting("fake_sales_broadcast_enabled", !current);
-  await ctx.reply(`✅ Group Sales Broadcast is now ${!current ? "ENABLED" : "DISABLED"}.`);
+  await ctx.answerCbQuery(!current ? "🟢 Sales Broadcast ENABLED" : "🔴 Sales Broadcast DISABLED", { show_alert: true }).catch(() => {});
+  return renderAdminSettings(ctx);
 });
 
 bot.action("adm_toggle_fake_deps", async (ctx) => {
   if (!adminOnly(ctx)) return;
-  await ctx.answerCbQuery().catch(() => {});
   const current = getSetting("fake_deposits_broadcast_enabled") !== false;
   setSetting("fake_deposits_broadcast_enabled", !current);
-  await ctx.reply(`✅ Group Deposits Broadcast is now ${!current ? "ENABLED" : "DISABLED"}.`);
+  await ctx.answerCbQuery(!current ? "🟢 Deposits Broadcast ENABLED" : "🔴 Deposits Broadcast DISABLED", { show_alert: true }).catch(() => {});
+  return renderAdminSettings(ctx);
 });
 
 bot.action("adm_toggle_fj", async (ctx) => {
   if (!adminOnly(ctx)) return;
-  await ctx.answerCbQuery().catch(() => {});
   const current = getSetting("force_join_enabled");
   setSetting("force_join_enabled", !current);
-  await ctx.reply(`✅ Force Join is now ${!current ? "ENABLED" : "DISABLED"}.`);
+  await ctx.answerCbQuery(!current ? "🟢 Force Join ENABLED" : "🔴 Force Join DISABLED", { show_alert: true }).catch(() => {});
+  return renderAdminSettings(ctx);
 });
 
 bot.action("adm_set_chan", async (ctx) => {

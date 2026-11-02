@@ -21,6 +21,7 @@ const defaultSettings = {
   group_id: process.env.FORCE_GROUP_ID || "",
   group_link: process.env.FORCE_GROUP_LINK || "https://t.me/",
   force_join_enabled: false,
+  binance_pay_enabled: true,
   bep20_usdt_address: process.env.BEP20_USDT_ADDRESS || "0xC3fC8C91A5B26C71DcD0aC1F34944FB298bCeBbF",
   polygon_usdt_address: process.env.POLYGON_USDT_ADDRESS || "0x58F0C60b37E5c84C4C7fE4a553F1fCe6405F412b",
   binance_pay_id: process.env.BINANCE_PAY_ID || "",

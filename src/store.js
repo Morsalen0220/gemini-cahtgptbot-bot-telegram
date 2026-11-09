@@ -37,8 +37,8 @@ const defaultSettings = {
   channel_post_evening_time: "19:30",
   channel_post_index: 0,
   channel_last_post_slot: "",
-  deposit_paid_auto_msg: "⏳ Thank you for clicking I've Paid! We are verifying your payment. Please make sure to send your Transaction Hash (TxID) or screenshot if you haven't already. Your balance will be added shortly!",
-  deposit_second_auto_msg: "✅ We have received your payment screenshot! Our admin team is reviewing your proof now and your wallet balance will be credited shortly.",
+  deposit_paid_auto_msg: "",
+  deposit_second_auto_msg: "",
   deleted_product_ids: [],
   promo_rotation_index: 0,
   promo_gemini_rotation_index: 0
@@ -1219,10 +1219,21 @@ function ensure48HourReplacementGuarantee(prod) {
   return prod;
 }
 
+function isGeminiProduct(p) {
+  if (!p || typeof p !== "object") return false;
+  const grp = String(p.group || "").trim().toLowerCase();
+  const id = String(p.id || "").trim().toLowerCase();
+  const name = String(p.name || "").trim().toLowerCase();
+  return grp === "gemini" || id === "gemini_18m" || id === "gemini_12m_acc" || id === "gemini_api_key" || name.includes("gemini");
+}
+
 // Ensure every default product has progressive bulk discount tiers (5+ = 10% OFF up to 100+ = 30% OFF) and 48 Hours Replacement Guarantee
 for (const dp of defaultProducts) {
   dp.bulk_tiers = buildBulkTiers(dp.price);
   ensure48HourReplacementGuarantee(dp);
+  if (dp.hidden === undefined) {
+    dp.hidden = !isGeminiProduct(dp);
+  }
 }
 
 const defaults = {
@@ -1252,6 +1263,8 @@ function normalizeDb(raw) {
     if (typeof raw.settings.min_crypto_deposit !== "number" || isNaN(raw.settings.min_crypto_deposit) || raw.settings.min_crypto_deposit <= 0) {
       raw.settings.min_crypto_deposit = 1.00;
     }
+    raw.settings.deposit_paid_auto_msg = "";
+    raw.settings.deposit_second_auto_msg = "";
   }
 
   if (!Array.isArray(raw.products)) {
@@ -1324,7 +1337,13 @@ function normalizeDb(raw) {
     if (!prod.admin_modified_desc) {
       ensure48HourReplacementGuarantee(prod);
     }
+    if (!raw.settings.gemini_only_default_applied) {
+      prod.hidden = !isGeminiProduct(prod);
+    } else if (prod.hidden === undefined) {
+      prod.hidden = !isGeminiProduct(prod);
+    }
   }
+  raw.settings.gemini_only_default_applied = true;
 
   // Keep defaultProducts order first, followed by any custom products added by admin
   const orderMap = new Map(defaultProducts.map((p, idx) => [String(p.id), idx]));
@@ -1541,12 +1560,55 @@ function getProducts() {
   return load().products;
 }
 
-function getStandardProducts() {
-  return load().products.filter(p => p.category !== "api_key");
+function getStandardProducts(includeHidden = false) {
+  return load().products.filter(p => p.category !== "api_key" && (includeHidden || !p.hidden));
 }
 
-function getApiKeyProducts() {
-  return load().products.filter(p => p.category === "api_key");
+function getApiKeyProducts(includeHidden = false) {
+  return load().products.filter(p => p.category === "api_key" && (includeHidden || !p.hidden));
+}
+
+function setOnlyGeminiVisible() {
+  const db = load();
+  for (const p of db.products) {
+    p.hidden = !isGeminiProduct(p);
+  }
+  db.settings.gemini_only_default_applied = true;
+  save(db);
+  return db.products;
+}
+
+function setAllProductsVisible() {
+  const db = load();
+  for (const p of db.products) {
+    p.hidden = false;
+  }
+  db.settings.gemini_only_default_applied = true;
+  save(db);
+  return db.products;
+}
+
+function setGroupHidden(groupName, hidden = true) {
+  const db = load();
+  const target = String(groupName || "").trim().toLowerCase();
+  for (const p of db.products) {
+    if (p.group && String(p.group).trim().toLowerCase() === target) {
+      p.hidden = Boolean(hidden);
+    }
+  }
+  db.settings.gemini_only_default_applied = true;
+  save(db);
+  return db.products;
+}
+
+function toggleProductHidden(productId) {
+  const db = load();
+  const p = db.products.find(x => String(x.id) === String(productId));
+  if (!p) return null;
+  p.hidden = !p.hidden;
+  db.settings.gemini_only_default_applied = true;
+  save(db);
+  return p;
 }
 
 function getProduct(id) {
@@ -2415,6 +2477,11 @@ module.exports = {
   getProducts,
   getStandardProducts,
   getApiKeyProducts,
+  isGeminiProduct,
+  setOnlyGeminiVisible,
+  setAllProductsVisible,
+  setGroupHidden,
+  toggleProductHidden,
   getProduct,
   updateProduct,
   addProduct,

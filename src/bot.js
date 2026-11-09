@@ -14,6 +14,11 @@ const {
   getProducts,
   getStandardProducts,
   getApiKeyProducts,
+  isGeminiProduct,
+  setOnlyGeminiVisible,
+  setAllProductsVisible,
+  setGroupHidden,
+  toggleProductHidden,
   getProduct,
   updateProduct,
   addProduct,
@@ -1024,9 +1029,21 @@ Select a category or product below — multi-plan packages and live prices are s
 
   const rows = [
     ...pairButtons(groupButtons, 2),
-    ...pairButtons(singleButtons, 2),
-    [Markup.button.callback("🔙 Go Back", "menu:main")]
+    ...pairButtons(singleButtons, 2)
   ];
+
+  // If only 1 group (e.g. Gemini) is visible and no single products are shown, also list its plans directly for 1-click access
+  if (groupMap.size === 1 && singleProducts.length === 0) {
+    const [, onlyGroupPlans] = Array.from(groupMap.entries())[0];
+    for (const plan of onlyGroupPlans) {
+      const planLabel = (plan.outOfStock || plan.stock <= 0)
+        ? `${plan.name} • Out of stock`
+        : `💎 ${plan.name} • $${Number(plan.price).toFixed(2)}`;
+      rows.push([Markup.button.callback(planLabel, `prod:${plan.id}`)]);
+    }
+  }
+
+  rows.push([Markup.button.callback("🔙 Go Back", "menu:main")]);
 
   const keyboard = Markup.inlineKeyboard(rows);
 
@@ -1101,8 +1118,8 @@ bot.action(/^prod:(.+)$/, async (ctx) => {
     ? "🔙 Back to API Keys"
     : (p && p.group ? `🔙 Back to ${p.group} Plans` : "🔙 Back to Catalog");
 
-  if (!p) {
-    return ctx.reply("❌ Product not found.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Catalog", "menu:buy")]]));
+  if (!p || p.hidden) {
+    return ctx.reply("❌ Product not available.", Markup.inlineKeyboard([[Markup.button.callback("🔙 Catalog", "menu:buy")]]));
   }
 
   if (p.outOfStock || p.stock <= 0) {
@@ -1957,54 +1974,6 @@ bot.on("photo", async (ctx, next) => {
       deposit.proof = ctx.message.caption || "Screenshot submitted";
       deposit.updated_at = new Date().toISOString();
       await notifyAdminNewDeposit(ctx, deposit, fileId);
-
-      // Automatic message triggered ONLY when user submits a screenshot (proof)
-      const targetUserId = ctx.from?.id || deposit.user_id;
-      if (targetUserId) {
-        if (markDepositAutoMsgSent(targetUserId)) {
-          // 1st screenshot submitted -> send 1st auto-message after 1 min 30 seconds (90s)
-          setTimeout(() => {
-            if (isUserBlocked(targetUserId)) return;
-            const autoMsg = getSetting("deposit_paid_auto_msg");
-            if (autoMsg && String(autoMsg).trim()) {
-              bot.telegram.sendMessage(
-                targetUserId,
-                String(autoMsg).trim(),
-                Markup.inlineKeyboard([
-                  [
-                    Markup.button.callback("🛍️ Buy", "menu:buy"),
-                    Markup.button.callback("💳 Add Funds / Deposit", "deposit:start")
-                  ],
-                  [
-                    Markup.button.callback("🎫 Open Ticket", "ticket:new")
-                  ]
-                ])
-              ).catch(() => {});
-            }
-          }, 90 * 1000);
-        } else if (markSecondDepositScreenshotMsgSent(targetUserId)) {
-          // 2nd screenshot submitted -> send 2nd auto-message after 1 min 30 seconds (90s)
-          setTimeout(() => {
-            if (isUserBlocked(targetUserId)) return;
-            const secondMsg = getSetting("deposit_second_auto_msg");
-            if (secondMsg && String(secondMsg).trim()) {
-              bot.telegram.sendMessage(
-                targetUserId,
-                String(secondMsg).trim(),
-                Markup.inlineKeyboard([
-                  [
-                    Markup.button.callback("🛍️ Buy", "menu:buy"),
-                    Markup.button.callback("💳 Add Funds / Deposit", "deposit:start")
-                  ],
-                  [
-                    Markup.button.callback("🎫 Open Ticket", "ticket:new")
-                  ]
-                ])
-              ).catch(() => {});
-            }
-          }, 90 * 1000);
-        }
-      }
 
       return ctx.reply(
         `✅ Thank you! Your screenshot for Deposit ${depositId} has been submitted.\n\nAdmin will verify and credit your wallet shortly!`,
@@ -2900,7 +2869,10 @@ async function showAdminDashboard(ctx) {
   const pendingDeps = getPendingDeposits().length;
   const totalDeps = getAllDeposits().length;
   const openTickets = getOpenTickets().length;
-  const products = getProducts().length;
+  const allProds = getProducts();
+  const products = allProds.length;
+  const visibleProds = allProds.filter(p => !p.hidden).length;
+  const hiddenProds = products - visibleProds;
   const users = getAllUsers().length;
   const blockedCount = getBlockedUsers().length;
   const totalPromos = getPromoMessages().length;
@@ -2910,7 +2882,7 @@ async function showAdminDashboard(ctx) {
 📊 Live Bot Stats:
 • Registered Users: ${users}
 • Blocked Users: ${blockedCount}
-• Products: ${products}
+• Products: ${visibleProds} Visible / ${hiddenProds} Hidden (${products} Total)
 • Saved Promo Messages: ${totalPromos} Ready
 • Deposits: ${pendingDeps} Pending (${totalDeps} Total)
 • Open Support Tickets: ${openTickets}
@@ -2922,11 +2894,14 @@ Select an action below:`;
     [Markup.button.callback(`📥 Deposits Manager (${pendingDeps} Pending / ${totalDeps} All)`, "adm:deposits:pending:0")],
     [Markup.button.callback(`🎫 Support Tickets (${openTickets} Open)`, "adm:tickets:open:0")],
     [Markup.button.callback("🛍️ Products & Inventory", "adm:products")],
+    [Markup.button.callback(`👁️ Hide / Show Products (${visibleProds} On / ${hiddenProds} Hidden)`, "adm:visibility")],
+    [
+      Markup.button.callback("💎 Keep Only Gemini Pro AI", "adm_vis_only_gemini"),
+      Markup.button.callback("👁️ Show All Products", "adm_vis_show_all")
+    ],
     [Markup.button.callback("👥 Customers & Direct Messages", "adm:customers:0")],
     [Markup.button.callback(`🚫 Block / Unblock Users (${blockedCount} Blocked)`, "adm:blocked_menu")],
     [Markup.button.callback("🆔 Message by Telegram ID", "adm:msg_by_id")],
-    [Markup.button.callback("⏱️ Set 1st Deposit Auto-Msg (15s)", "adm_set_dep_auto_msg")],
-    [Markup.button.callback("📸 Set 2nd Deposit Auto-Msg (Screenshot)", "adm_set_dep_second_msg")],
     [Markup.button.callback("👤 User Balance Adjuster", "adm:user_bal")],
     [Markup.button.callback("⚙️ Force Join & Payment Settings", "adm:settings")],
     [Markup.button.callback("📢 Channel Auto-Poster (2x/Day)", "adm:channel_poster")],
@@ -3721,6 +3696,8 @@ bot.action("adm:products", async (ctx) => {
 
 async function showAdminProductsMenu(ctx) {
   const products = getProducts();
+  const visibleCount = products.filter(p => !p.hidden).length;
+  const hiddenCount = products.length - visibleCount;
   const standardProds = products.filter(p => p.category !== "api_key");
   const apiKeyProds = products.filter(p => p.category === "api_key");
 
@@ -3738,22 +3715,25 @@ async function showAdminProductsMenu(ctx) {
 
   const text = `🛍️ <b>ADMIN PRODUCTS & PLANS MANAGER</b>
 ━━━━━━━━━━━━━━━━━━━━━
+• <b>Visibility Status:</b> 👁️ <b>${visibleCount} Visible</b> | 🙈 <b>${hiddenCount} Hidden</b>
 • <b>Multi-Plan Groups:</b> ${groupMap.size} Groups (${standardProds.length - singleProducts.length} Plans)
 • <b>Single Products:</b> ${singleProducts.length} Items
 • <b>AI API Keys:</b> ${apiKeyProds.length} Items
 • <b>Total Catalog Items:</b> ${products.length}
 
-👇 <i>Tap a Multi-Plan Group (📂) to edit its plans, or tap any Single Product (🛍️) / AI Key (🆙) to edit its Name, Price, Description, Terms, or Stock:</i>`;
+👇 <i>Tap a Multi-Plan Group (📂) to edit its plans, or tap any Single Product / AI Key to edit its Name, Price, Description, Terms, Stock, or Visibility:</i>`;
 
   const groupBtns = [];
   for (const [grpName, plans] of groupMap.entries()) {
+    const allHidden = plans.every(pl => pl.hidden);
+    const visIcon = allHidden ? "🙈" : "📂";
     groupBtns.push(
-      Markup.button.callback(`📂 ${grpName} ▸ ${plans.length} Plans`, `adm_grp:${grpName}`)
+      Markup.button.callback(`${visIcon} ${grpName} ▸ ${plans.length} Plans`, `adm_grp:${grpName}`)
     );
   }
 
   const singleBtns = singleProducts.map((p) => {
-    const status = p.outOfStock ? "🚫" : "🛍️";
+    const status = p.hidden ? "🙈" : (p.outOfStock ? "🚫" : "🛍️");
     return Markup.button.callback(
       `${status} ${p.name} $${Number(p.price || 0).toFixed(2)}`,
       `adm_edit_prod:${p.id}`
@@ -3761,13 +3741,19 @@ async function showAdminProductsMenu(ctx) {
   });
 
   const apiBtns = apiKeyProds.map((p) => {
+    const icon = p.hidden ? "🙈" : "🆙";
     return Markup.button.callback(
-      `🆙 ${safeLabelSlice(p.name, 18)} $${Number(p.price || 0).toFixed(2)}`,
+      `${icon} ${safeLabelSlice(p.name, 18)} $${Number(p.price || 0).toFixed(2)}`,
       `adm_edit_prod:${p.id}`
     );
   });
 
   const rows = [
+    [
+      Markup.button.callback("💎 Keep Only Gemini Pro AI", "adm_vis_only_gemini"),
+      Markup.button.callback("👁️ Show All Products", "adm_vis_show_all")
+    ],
+    [Markup.button.callback(`🙈 Quick Hide / Unhide Products (${visibleCount} On / ${hiddenCount} Off)`, "adm:visibility")],
     [Markup.button.callback("➕ Add New Product / Plan / AI Key", "adm_add_prod_start")],
     ...pairButtons(groupBtns, 2),
     ...pairButtons(singleBtns, 2),
@@ -3784,12 +3770,141 @@ async function showAdminProductsMenu(ctx) {
   await ctx.reply(text, { parse_mode: "HTML", ...markup });
 }
 
+// Admin: 1-Click Visibility / Hide & Show Manager
+bot.action("adm:visibility", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  await ctx.answerCbQuery().catch(() => {});
+  return showAdminVisibilityMenu(ctx);
+});
+
+bot.action("adm_vis_only_gemini", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  setOnlyGeminiVisible();
+  await ctx.answerCbQuery("💎 Only Gemini Pro AI is now visible! All other products are hidden.", { show_alert: true }).catch(() => {});
+  return showAdminVisibilityMenu(ctx);
+});
+
+bot.action("adm_vis_show_all", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  setAllProductsVisible();
+  await ctx.answerCbQuery("👁️ All products are now visible in the catalog!", { show_alert: true }).catch(() => {});
+  return showAdminVisibilityMenu(ctx);
+});
+
+bot.action(/^adm_vis_grp:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const grpName = ctx.match[1];
+  const plans = getProducts().filter(
+    p => p.group && String(p.group).trim().toLowerCase() === String(grpName).trim().toLowerCase()
+  );
+  const currentlyAllHidden = plans.length > 0 && plans.every(pl => pl.hidden);
+  setGroupHidden(grpName, !currentlyAllHidden);
+  await ctx.answerCbQuery(
+    currentlyAllHidden ? `👁️ ${grpName} is now VISIBLE!` : `🙈 ${grpName} is now HIDDEN!`
+  ).catch(() => {});
+  return showAdminVisibilityMenu(ctx);
+});
+
+bot.action(/^adm_vis_prod:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const updated = toggleProductHidden(ctx.match[1]);
+  if (!updated) return ctx.answerCbQuery("Product not found").catch(() => {});
+  await ctx.answerCbQuery(
+    updated.hidden ? `🙈 ${updated.name} is now HIDDEN!` : `👁️ ${updated.name} is now VISIBLE!`
+  ).catch(() => {});
+  return showAdminVisibilityMenu(ctx);
+});
+
+async function showAdminVisibilityMenu(ctx) {
+  const products = getProducts();
+  const visibleCount = products.filter(p => !p.hidden).length;
+  const hiddenCount = products.length - visibleCount;
+  const standardProds = products.filter(p => p.category !== "api_key");
+  const apiKeyProds = products.filter(p => p.category === "api_key");
+
+  const groupMap = new Map();
+  const singleProducts = [];
+  for (const p of standardProds) {
+    const grp = p.group ? String(p.group).trim() : "";
+    if (grp) {
+      if (!groupMap.has(grp)) groupMap.set(grp, []);
+      groupMap.get(grp).push(p);
+    } else {
+      singleProducts.push(p);
+    }
+  }
+
+  const text = `👁️ <b>HIDE / SHOW PRODUCTS (VISIBILITY MANAGER)</b>
+━━━━━━━━━━━━━━━━━━━━━
+• <b>Currently Visible:</b> <b>${visibleCount}</b> items
+• <b>Currently Hidden:</b> <b>${hiddenCount}</b> items
+
+💡 <b>How to use:</b>
+• Tap <b>"💎 Keep Only Gemini Pro AI"</b> to immediately hide all other products and show only Gemini Pro AI!
+• Tap <b>"👁️ Show All Products"</b> to unhide everything.
+• Or tap any Category / Product button below to toggle it between <b>🟢 Visible</b> and <b>🙈 Hidden</b> in 1 click:`;
+
+  const groupBtns = [];
+  for (const [grpName, plans] of groupMap.entries()) {
+    const visibleInGrp = plans.filter(pl => !pl.hidden).length;
+    const badge = visibleInGrp > 0 ? "🟢 ON" : "🙈 HIDDEN";
+    groupBtns.push(
+      Markup.button.callback(`${badge} • 📂 ${grpName} (${visibleInGrp}/${plans.length})`, `adm_vis_grp:${grpName}`)
+    );
+  }
+
+  const singleBtns = singleProducts.map((p) => {
+    const badge = p.hidden ? "🙈" : "🟢";
+    return Markup.button.callback(
+      `${badge} ${safeLabelSlice(p.name, 16)}`,
+      `adm_vis_prod:${p.id}`
+    );
+  });
+
+  const apiBtns = apiKeyProds.map((p) => {
+    const badge = p.hidden ? "🙈" : "🟢";
+    return Markup.button.callback(
+      `${badge} 🆙 ${safeLabelSlice(p.name, 14)}`,
+      `adm_vis_prod:${p.id}`
+    );
+  });
+
+  const rows = [
+    [Markup.button.callback("💎 Keep Only Gemini Pro AI (Hide All Others)", "adm_vis_only_gemini")],
+    [Markup.button.callback("👁️ Show / Unhide All Products", "adm_vis_show_all")],
+    ...pairButtons(groupBtns, 2),
+    ...pairButtons(singleBtns, 2),
+    ...pairButtons(apiBtns, 2),
+    [
+      Markup.button.callback("🛍️ Products Manager", "adm:products"),
+      Markup.button.callback("🔙 Admin Menu", "adm:menu")
+    ]
+  ];
+
+  const markup = Markup.inlineKeyboard(rows);
+  if (ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...markup });
+    } catch (e) {}
+  }
+  return ctx.reply(text, { parse_mode: "HTML", ...markup });
+}
+
 // Admin: View & Edit Plans inside a Multi-Plan Group
 bot.action(/^adm_grp:(.+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
   await ctx.answerCbQuery().catch(() => {});
   const groupName = ctx.match[1];
   return showAdminGroupPlans(ctx, groupName);
+});
+
+bot.action(/^adm_grp_vis:([^:]+):(hide|show)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const grpName = ctx.match[1];
+  const shouldHide = ctx.match[2] === "hide";
+  setGroupHidden(grpName, shouldHide);
+  await ctx.answerCbQuery(shouldHide ? `🙈 ${grpName} hidden from catalog!` : `👁️ ${grpName} is now visible!`).catch(() => {});
+  return showAdminGroupPlans(ctx, grpName);
 });
 
 async function showAdminGroupPlans(ctx, groupName) {
@@ -3802,21 +3917,29 @@ async function showAdminGroupPlans(ctx, groupName) {
   }
 
   const displayGroup = plans[0].group || groupName;
-  let text = `📂 <b>MANAGE GROUP: ${escapeHtml(displayGroup.toUpperCase())} (${plans.length} Plans)</b>\n━━━━━━━━━━━━━━━━━━━━━\nSelect any plan below to edit its <b>Name, Price, Description, Terms, or Stock</b>:\n`;
+  const allHidden = plans.every(pl => pl.hidden);
+  let text = `📂 <b>MANAGE GROUP: ${escapeHtml(displayGroup.toUpperCase())} (${plans.length} Plans)</b>\n━━━━━━━━━━━━━━━━━━━━━\nSelect any plan below to edit its <b>Name, Price, Description, Terms, Stock, or Visibility</b>:\n`;
 
   plans.forEach((plan, idx) => {
     const status = plan.outOfStock ? "🚫 Out" : `Stock: ${plan.stock}`;
+    const visLabel = plan.hidden ? "🙈 HIDDEN" : "👁️ VISIBLE";
     const firstDesc = String(plan.description || "").split("\n")[0] || "";
-    text += `\n<b>${idx + 1}. ${escapeHtml(plan.name)}</b> — <b>$${Number(plan.price).toFixed(2)}</b> (${status})\n<i>${escapeHtml(firstDesc)}</i>\n`;
+    text += `\n<b>${idx + 1}. ${escapeHtml(plan.name)}</b> — <b>$${Number(plan.price).toFixed(2)}</b> (${status} • ${visLabel})\n<i>${escapeHtml(firstDesc)}</i>\n`;
   });
 
   const rows = plans.map((plan) => [
     Markup.button.callback(
-      `✏️ ${plan.name} • $${Number(plan.price).toFixed(2)} (${plan.outOfStock ? "OUT" : `Stock: ${plan.stock}`})`,
+      `${plan.hidden ? "🙈" : "✏️"} ${plan.name} • $${Number(plan.price).toFixed(2)} (${plan.hidden ? "HIDDEN" : (plan.outOfStock ? "OUT" : `Stock: ${plan.stock}`)})`,
       `adm_edit_prod:${plan.id}`
     )
   ]);
 
+  rows.push([
+    Markup.button.callback(
+      allHidden ? `👁️ Unhide Entire ${displayGroup} Group` : `🙈 Hide Entire ${displayGroup} Group`,
+      `adm_grp_vis:${displayGroup}:${allHidden ? "show" : "hide"}`
+    )
+  ]);
   rows.push([Markup.button.callback(`➕ Add New Plan to ${displayGroup}`, `adm_add_plan_grp:${displayGroup}`)]);
   rows.push([Markup.button.callback("🔙 All Products & Groups", "adm:products")]);
 
@@ -3847,6 +3970,7 @@ async function showAdminEditProduct(ctx, productId) {
   const text = `🛍️ <b>EDIT PRODUCT: ${escapeHtml(p.name)}</b>
 ━━━━━━━━━━━━━━━━━━━━━
 • <b>ID:</b> <code>${escapeHtml(p.id)}</code>
+• <b>Visibility:</b> <b>${p.hidden ? "🙈 Hidden from Store" : "👁️ Visible in Store"}</b>
 • <b>Type / Group:</b> ${categoryLabel}
 • <b>Price:</b> <b>$${Number(p.price).toFixed(2)} (${money(p.price)})</b>
 • <b>Current Stock:</b> <b>${p.stock}</b> (${p.outOfStock ? "🚫 Out of Stock" : "✅ In Stock"})
@@ -3865,6 +3989,12 @@ ${escapeHtml(p.terms || "None")}`;
   backRow.push(Markup.button.callback("🛍️ All Products", "adm:products"));
 
   const buttons = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        p.hidden ? "👁️ Unhide Product (Show in Store)" : "🙈 Hide Product (Hide from Store)",
+        `adm_toggle_hide:${p.id}`
+      )
+    ],
     [
       Markup.button.callback("✏️ Edit Name", `adm_set_name:${p.id}`),
       Markup.button.callback("💲 Set Price", `adm_set_price:${p.id}`)
@@ -3894,6 +4024,14 @@ ${escapeHtml(p.terms || "None")}`;
   }
   await ctx.reply(text, { parse_mode: "HTML", ...buttons });
 }
+
+bot.action(/^adm_toggle_hide:(.+)$/, async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  const p = toggleProductHidden(ctx.match[1]);
+  if (!p) return ctx.answerCbQuery("Product not found").catch(() => {});
+  await ctx.answerCbQuery(p.hidden ? "🙈 Product is now HIDDEN from store!" : "👁️ Product is now VISIBLE in store!").catch(() => {});
+  return showAdminEditProduct(ctx, p.id);
+});
 
 bot.action(/^adm_toggle_stock:(.+)$/, async (ctx) => {
   if (!adminOnly(ctx)) return;
@@ -4360,8 +4498,6 @@ async function renderAdminSettings(ctx) {
 • BEP20 Deposit Description: ${s.bep20_deposit_desc ? "✅ Custom" : "Default"}
 • Support Handle: ${s.support_username || "Not Set"}
 • Min Crypto Deposit: $${minCrypto.toFixed(2)} USDT
-• 1st Deposit Auto-Msg (1m 30s): ${s.deposit_paid_auto_msg ? "✅ Set" : "❌ Empty"}
-• 2nd Deposit Auto-Msg (Screenshot, 1m 30s): ${s.deposit_second_auto_msg ? "✅ Set" : "❌ Empty"}
 • Group Sales Broadcast: ${s.fake_sales_broadcast_enabled !== false ? "✅ ENABLED (~2 mins)" : "❌ DISABLED"}
 • Group Deposits Broadcast: ${s.fake_deposits_broadcast_enabled !== false ? "✅ ENABLED (~20 mins)" : "❌ DISABLED"}`;
 
@@ -4383,8 +4519,6 @@ async function renderAdminSettings(ctx) {
     [Markup.button.callback("✏️ Edit BEP20 USDT", "adm_set_bep20"), Markup.button.callback("✏️ Edit Polygon USDT", "adm_set_polygon")],
     [Markup.button.callback("📝 Edit BEP20 Description", "adm_set_bep20_desc")],
     [Markup.button.callback("✏️ Edit Support", "adm_set_support"), Markup.button.callback("✏️ Edit Min Crypto Dep", "adm_set_min_crypto")],
-    [Markup.button.callback("⏱️ Set 1st Deposit Auto-Msg", "adm_set_dep_auto_msg")],
-    [Markup.button.callback("📸 Set 2nd Deposit Auto-Msg (Screenshot)", "adm_set_dep_second_msg")],
     [Markup.button.callback("🔙 Admin Menu", "adm:menu")]
   ]);
 
@@ -5744,14 +5878,16 @@ app.get("/health", (req, res) => {
 
 // GET /api/products
 app.get("/api/products", (req, res) => {
-  const products = getProducts().map((p) => ({
-    id: p.id,
-    name: p.name,
-    price: p.price,
-    stock: p.stock,
-    outOfStock: p.outOfStock,
-    bulk_tiers: p.bulk_tiers
-  }));
+  const products = getProducts()
+    .filter((p) => !p.hidden)
+    .map((p) => ({
+      id: p.id,
+      name: p.name,
+      price: p.price,
+      stock: p.stock,
+      outOfStock: p.outOfStock,
+      bulk_tiers: p.bulk_tiers
+    }));
   res.status(200).json({ ok: true, products });
 });
 
@@ -5768,7 +5904,7 @@ app.post("/api/order", (req, res) => {
 
   const { product_id, quantity } = req.body;
   const p = getProduct(product_id);
-  if (!p) return res.status(404).json({ ok: false, error: "Product not found" });
+  if (!p || p.hidden) return res.status(404).json({ ok: false, error: "Product not found" });
 
   const qty = Math.max(1, parseInt(quantity, 10) || 1);
   if (p.outOfStock || p.stock < qty) {
@@ -5849,19 +5985,21 @@ function generateUniqueMaskedId() {
 }
 
 function pickBroadcastProduct() {
-  const products = getProducts();
-  const gemini = products.find(p => p.id === "gemini_18m");
+  const allProducts = getProducts();
+  const visible = allProducts.filter(p => !p.hidden);
+  const pool = visible.length > 0 ? visible : allProducts;
+  const gemini = pool.find(p => p.id === "gemini_18m");
 
-  // 75% chance Gemini Links 18M, 25% other catalog products
+  // 75% chance Gemini Links 18M, 25% other visible catalog products
   if (gemini && Math.random() < 0.75) {
     return gemini;
   }
 
-  const others = products.filter(p => p.id !== "gemini_18m");
+  const others = pool.filter(p => p.id !== "gemini_18m");
   if (others.length > 0) {
     return others[Math.floor(Math.random() * others.length)];
   }
-  return gemini || products[0];
+  return gemini || pool[0];
 }
 
 function pickBroadcastQuantity() {
